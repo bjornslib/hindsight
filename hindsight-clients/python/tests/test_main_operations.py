@@ -6,10 +6,11 @@ These tests require a running Hindsight API server.
 
 import os
 import uuid
-import pytest
 from datetime import datetime
-from hindsight_client import Hindsight
 
+import pytest
+
+from hindsight_client import Hindsight
 
 # Test configuration
 HINDSIGHT_API_URL = os.getenv("HINDSIGHT_API_URL", "http://localhost:8888")
@@ -138,7 +139,7 @@ class TestReflect:
         """Setup: Store some test memories and bank background."""
         client.create_bank(
             bank_id=bank_id,
-            background="I am a helpful AI assistant interested in technology and science.",
+            mission="I am a helpful AI assistant interested in technology and science.",
         )
 
         client.retain_batch(
@@ -173,6 +174,48 @@ class TestReflect:
         assert response.text is not None
         assert len(response.text) > 0
 
+    def test_reflect_with_max_tokens(self, client, bank_id):
+        """Test reflect with custom max_tokens parameter."""
+        response = client.reflect(
+            bank_id=bank_id,
+            query="What do you think about Python?",
+            max_tokens=500,
+        )
+
+        assert response is not None
+        assert response.text is not None
+        assert len(response.text) > 0
+
+    def test_reflect_with_structured_output(self, client, bank_id):
+        """Test reflect with structured output via response_schema.
+
+        When response_schema is provided, the response returns structured_output
+        field parsed according to the provided JSON schema.
+        """
+
+        from pydantic import BaseModel
+
+        # Define schema using Pydantic model
+        class RecommendationResponse(BaseModel):
+            recommendation: str
+            reasons: list[str]
+            confidence: str | None = None  # Optional for LLM flexibility
+
+        response = client.reflect(
+            bank_id=bank_id,
+            query="What programming language should I learn for data science?",
+            response_schema=RecommendationResponse.model_json_schema(),
+            max_tokens=10000,
+        )
+
+        assert response is not None
+
+        # Verify structured output is present and can be parsed into model
+        assert response.structured_output is not None
+        result = RecommendationResponse.model_validate(response.structured_output)
+        assert result.recommendation
+        assert isinstance(result.reasons, list)
+
 
 class TestListMemories:
     """Tests for listing memories."""
@@ -182,9 +225,7 @@ class TestListMemories:
         """Setup: Store some test memories synchronously."""
         client.retain_batch(
             bank_id=bank_id,
-            items=[
-                {"content": f"Alice likes topic number {i}"} for i in range(5)
-            ],
+            items=[{"content": f"Alice likes topic number {i}"} for i in range(5)],
             retain_async=False,  # Wait for fact extraction to complete
         )
 
@@ -220,7 +261,7 @@ class TestEndToEndWorkflow:
         # 1. Create bank
         client.create_bank(
             bank_id=workflow_bank_id,
-            background="I am a software engineer who loves Python programming.",
+            mission="I am a software engineer who loves Python programming.",
         )
 
         # 2. Store memories
@@ -317,6 +358,7 @@ class TestDocuments:
     def test_delete_document(self, client, bank_id):
         """Test deleting a document."""
         import asyncio
+
         from hindsight_client_api import ApiClient, Configuration
         from hindsight_client_api.api import DocumentsApi
 
@@ -348,6 +390,7 @@ class TestDocuments:
     def test_get_document(self, client, bank_id):
         """Test getting a document."""
         import asyncio
+
         from hindsight_client_api import ApiClient, Configuration
         from hindsight_client_api.api import DocumentsApi
 
@@ -390,6 +433,7 @@ class TestEntities:
     def test_list_entities(self, client, bank_id):
         """Test listing entities."""
         import asyncio
+
         from hindsight_client_api import ApiClient, Configuration
         from hindsight_client_api.api import EntitiesApi
 
@@ -404,10 +448,44 @@ class TestEntities:
         assert response is not None
         assert response.items is not None
         assert isinstance(response.items, list)
+        # Verify pagination fields
+        assert response.total is not None
+        assert response.limit is not None
+        assert response.offset is not None
+        assert response.offset == 0
+        assert response.limit == 100  # default limit
+
+    def test_list_entities_with_pagination(self, client, bank_id):
+        """Test listing entities with pagination parameters."""
+        import asyncio
+
+        from hindsight_client_api import ApiClient, Configuration
+        from hindsight_client_api.api import EntitiesApi
+
+        async def do_list_paginated():
+            config = Configuration(host=HINDSIGHT_API_URL)
+            api_client = ApiClient(config)
+            api = EntitiesApi(api_client)
+
+            # Test with custom limit
+            response = await api.list_entities(bank_id=bank_id, limit=5, offset=0)
+            assert response.limit == 5
+            assert response.offset == 0
+            assert len(response.items) <= 5
+
+            # Test with offset
+            response_offset = await api.list_entities(bank_id=bank_id, limit=1, offset=1)
+            assert response_offset.offset == 1
+            assert response_offset.limit == 1
+
+            return response
+
+        asyncio.get_event_loop().run_until_complete(do_list_paginated())
 
     def test_get_entity(self, client, bank_id):
         """Test getting a specific entity."""
         import asyncio
+
         from hindsight_client_api import ApiClient, Configuration
         from hindsight_client_api.api import EntitiesApi
 
@@ -433,36 +511,152 @@ class TestEntities:
             assert entity is not None
             assert entity.id == entity_id
 
-    def test_regenerate_entity_observations(self, client, bank_id):
-        """Test regenerating observations for an entity."""
-        import asyncio
-        from hindsight_client_api import ApiClient, Configuration
-        from hindsight_client_api.api import EntitiesApi
 
-        async def do_test():
-            config = Configuration(host=HINDSIGHT_API_URL)
-            api_client = ApiClient(config)
-            api = EntitiesApi(api_client)
 
-            # First list entities to get an ID
-            list_response = await api.list_entities(bank_id=bank_id)
+class TestTags:
+    """Tests for tags filtering functionality."""
 
-            if list_response.items and len(list_response.items) > 0:
-                entity_id = list_response.items[0].id
+    @pytest.fixture(autouse=True)
+    def setup_memories(self, client, bank_id):
+        """Setup: Store memories with different tags."""
+        client.retain_batch(
+            bank_id=bank_id,
+            items=[
+                {"content": "Alice presented the Q3 roadmap at the Monday standup", "tags": ["project_x", "meetings"]},
+                {"content": "Bob wrote the architecture document for the new auth system", "tags": ["project_x", "docs"]},
+                {"content": "Charlie led the sprint planning session for the mobile app", "tags": ["project_y", "meetings"]},
+                {"content": "Diana announced the company picnic for next Friday", "tags": ["company"]},
+                {"content": "Eve mentioned she likes pineapple on pizza"},  # no tags
+            ],
+            retain_async=False,
+        )
 
-                # Regenerate observations
-                result = await api.regenerate_entity_observations(
-                    bank_id=bank_id,
-                    entity_id=entity_id,
-                )
-                return entity_id, result
-            return None, None
+    def test_recall_with_tags_any(self, client, bank_id):
+        """Test recall with tags using 'any' match (includes untagged)."""
+        response = client.recall(
+            bank_id=bank_id,
+            query="What has everyone been working on?",
+            tags=["project_x"],
+            tags_match="any",
+            max_tokens=16000,
+        )
 
-        entity_id, result = asyncio.get_event_loop().run_until_complete(do_test())
+        assert response is not None
+        assert response.results is not None
+        assert len(response.results) > 0
+        # 'any' mode: results should include items matching the tag or untagged items
+        result_tags = [set(r.tags) if r.tags else set() for r in response.results]
+        assert any("project_x" in tags for tags in result_tags)
 
-        if entity_id:
-            assert result is not None
-            assert result.id == entity_id
+    def test_recall_with_tags_any_strict(self, client, bank_id):
+        """Test recall with tags using 'any_strict' match (excludes untagged)."""
+        response = client.recall(
+            bank_id=bank_id,
+            query="What has everyone been working on?",
+            tags=["project_x"],
+            tags_match="any_strict",
+            max_tokens=16000,
+        )
+
+        assert response is not None
+        assert response.results is not None
+        assert len(response.results) > 0
+        # any_strict: every result must have the project_x tag
+        for r in response.results:
+            assert r.tags is not None
+            assert "project_x" in r.tags
+
+    def test_recall_with_tags_all_strict(self, client, bank_id):
+        """Test recall with tags using 'all_strict' match (AND matching)."""
+        response = client.recall(
+            bank_id=bank_id,
+            query="What has everyone been working on?",
+            tags=["project_x", "meetings"],
+            tags_match="all_strict",
+            max_tokens=16000,
+        )
+
+        assert response is not None
+        assert response.results is not None
+        assert len(response.results) > 0
+        # all_strict: every result must have BOTH tags
+        for r in response.results:
+            assert r.tags is not None
+            assert "project_x" in r.tags
+            assert "meetings" in r.tags
+
+    def test_recall_with_multiple_tags_any(self, client, bank_id):
+        """Test recall with multiple tags using 'any_strict' match (OR)."""
+        response = client.recall(
+            bank_id=bank_id,
+            query="What has everyone been working on?",
+            tags=["project_x", "project_y"],
+            tags_match="any_strict",
+            max_tokens=16000,
+        )
+
+        assert response is not None
+        assert response.results is not None
+        assert len(response.results) > 0
+        # any_strict with multiple tags: every result must have at least one of the tags
+        for r in response.results:
+            assert r.tags is not None
+            assert "project_x" in r.tags or "project_y" in r.tags
+
+    def test_reflect_with_tags(self, client, bank_id):
+        """Test reflect with tags filtering."""
+        response = client.reflect(
+            bank_id=bank_id,
+            query="Summarize project X activities",
+            tags=["project_x"],
+            tags_match="any_strict",
+        )
+
+        assert response is not None
+        assert response.text is not None
+        assert len(response.text) > 0
+
+    def test_retain_with_tags(self, client, bank_id):
+        """Test storing a memory with tags."""
+        response = client.retain(
+            bank_id=bank_id,
+            content="Frank deployed the billing microservice to production on Tuesday",
+            tags=["project_z", "features"],
+        )
+
+        assert response is not None
+        assert response.success is True
+
+        # Verify we can recall it with the tag
+        recall_response = client.recall(
+            bank_id=bank_id,
+            query="What did Frank deploy?",
+            tags=["project_z"],
+            tags_match="any_strict",
+            max_tokens=16000,
+        )
+        assert recall_response is not None
+        assert len(recall_response.results) > 0
+        # any_strict: every result must have the project_z tag
+        for r in recall_response.results:
+            assert r.tags is not None
+            assert "project_z" in r.tags
+
+    def test_retain_batch_with_document_tags(self, client, bank_id):
+        """Test batch retain with document-level tags."""
+        response = client.retain_batch(
+            bank_id=bank_id,
+            items=[
+                {"content": "First item in batch"},
+                {"content": "Second item in batch"},
+            ],
+            document_tags=["batch_import", "test_data"],
+            retain_async=False,
+        )
+
+        assert response is not None
+        assert response.success is True
+        assert response.items_count == 2
 
 
 class TestDeleteBank:
@@ -471,6 +665,7 @@ class TestDeleteBank:
     def test_delete_bank(self, client):
         """Test deleting a bank."""
         import asyncio
+
         from hindsight_client_api import ApiClient, Configuration
         from hindsight_client_api.api import BanksApi
 
@@ -480,7 +675,7 @@ class TestDeleteBank:
         # Create bank with some data
         client.create_bank(
             bank_id=bank_id,
-            background="This bank will be deleted",
+            mission="This bank will be deleted",
         )
         client.retain(
             bank_id=bank_id,
@@ -501,3 +696,188 @@ class TestDeleteBank:
         # Verify bank data is deleted - memories should be gone
         memories = client.list_memories(bank_id=bank_id)
         assert memories.total == 0
+
+
+class TestMission:
+    """Tests for mission operations."""
+
+    def test_set_mission(self, client, bank_id):
+        """Test setting a bank's mission."""
+        response = client.set_mission(
+            bank_id=bank_id,
+            mission="Be a helpful PM tracking sprint progress and team capacity",
+        )
+
+        assert response is not None
+        assert response.bank_id == bank_id
+        assert response.mission == "Be a helpful PM tracking sprint progress and team capacity"
+
+
+class TestAsyncRecall:
+    """Tests for async recall with full feature parity."""
+
+    @pytest.fixture(autouse=True)
+    async def setup_memories(self, client, bank_id):
+        """Setup: Store some test memories before search tests."""
+        await client.aretain_batch(
+            bank_id=bank_id,
+            items=[
+                {"content": "Alice loves programming in Python"},
+                {"content": "Bob enjoys hiking and outdoor adventures"},
+                {"content": "Charlie is interested in quantum physics"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_arecall_returns_recall_response(self, client, bank_id):
+        """Test that arecall returns a RecallResponse (not a list)."""
+        from hindsight_client_api.models.recall_response import RecallResponse
+
+        response = await client.arecall(
+            bank_id=bank_id,
+            query="What does Alice like?",
+        )
+
+        assert isinstance(response, RecallResponse)
+        assert response.results is not None
+        assert len(response.results) > 0
+
+    @pytest.mark.asyncio
+    async def test_arecall_with_include_chunks(self, client, bank_id):
+        """Test arecall with include_chunks returns raw text chunks."""
+        response = await client.arecall(
+            bank_id=bank_id,
+            query="programming",
+            include_chunks=True,
+        )
+
+        assert response is not None
+        assert response.results is not None
+        # chunks should be present (may be empty dict if not yet consolidated)
+        assert response.chunks is not None
+
+    @pytest.mark.asyncio
+    async def test_arecall_with_include_entities(self, client, bank_id):
+        """Test arecall with include_entities."""
+        response = await client.arecall(
+            bank_id=bank_id,
+            query="Alice",
+            include_entities=True,
+            max_entity_tokens=500,
+        )
+
+        assert response is not None
+        assert response.results is not None
+
+    @pytest.mark.asyncio
+    async def test_arecall_with_trace(self, client, bank_id):
+        """Test arecall with trace enabled."""
+        response = await client.arecall(
+            bank_id=bank_id,
+            query="outdoor activities",
+            trace=True,
+        )
+
+        assert response is not None
+        assert response.results is not None
+
+    @pytest.mark.asyncio
+    async def test_arecall_full_featured(self, client, bank_id):
+        """Test arecall with all parameters."""
+        response = await client.arecall(
+            bank_id=bank_id,
+            query="What are people's interests?",
+            types=["world"],
+            max_tokens=2048,
+            budget="high",
+            trace=True,
+            include_chunks=True,
+            max_chunk_tokens=4096,
+            include_entities=True,
+            max_entity_tokens=500,
+        )
+
+        assert response is not None
+        assert response.results is not None
+        assert response.chunks is not None
+
+
+class TestAsyncReflect:
+    """Tests for async reflect with full feature parity."""
+
+    @pytest.fixture(autouse=True)
+    async def setup_memories(self, client, bank_id):
+        """Setup: Store some test memories and bank background."""
+        await client.acreate_bank(
+            bank_id=bank_id,
+            mission="I am a helpful AI assistant interested in technology and science.",
+        )
+
+        await client.aretain_batch(
+            bank_id=bank_id,
+            items=[
+                {"content": "The Python programming language is great for data science"},
+                {"content": "Machine learning models can recognize patterns in data"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_areflect_with_max_tokens(self, client, bank_id):
+        """Test areflect with max_tokens parameter."""
+        response = await client.areflect(
+            bank_id=bank_id,
+            query="What do you think about Python?",
+            max_tokens=500,
+        )
+
+        assert response is not None
+        assert response.text is not None
+        assert len(response.text) > 0
+
+    @pytest.mark.asyncio
+    async def test_areflect_with_structured_output(self, client, bank_id):
+        """Test areflect with response_schema for structured output."""
+        from pydantic import BaseModel
+
+        class RecommendationResponse(BaseModel):
+            recommendation: str
+            reasons: list[str]
+            confidence: str | None = None
+
+        response = await client.areflect(
+            bank_id=bank_id,
+            query="What programming language should I learn for data science?",
+            response_schema=RecommendationResponse.model_json_schema(),
+            max_tokens=10000,
+        )
+
+        assert response is not None
+        assert response.structured_output is not None
+        result = RecommendationResponse.model_validate(response.structured_output)
+        assert result.recommendation
+        assert isinstance(result.reasons, list)
+
+
+class TestAsyncDeleteBank:
+    """Tests for async bank deletion."""
+
+    @pytest.mark.asyncio
+    async def test_adelete_bank(self, client):
+        """Test deleting a bank using the async method."""
+        bank_id = f"test_bank_adelete_{uuid.uuid4().hex[:12]}"
+
+        # Create bank with some data using async API
+        await client.acreate_bank(
+            bank_id=bank_id,
+            mission="This bank will be deleted via async",
+        )
+        await client.aretain(
+            bank_id=bank_id,
+            content="Some memory to store",
+        )
+
+        # Delete using async method
+        response = await client.adelete_bank(bank_id=bank_id)
+
+        assert response is not None
+        assert response.success is True

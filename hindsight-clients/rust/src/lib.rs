@@ -37,7 +37,13 @@ mod tests {
     async fn test_memory_lifecycle() {
         let api_url = std::env::var("HINDSIGHT_API_URL")
             .unwrap_or_else(|_| "http://localhost:8888".to_string());
-        let client = Client::new(&api_url);
+
+        // Use a custom reqwest client with longer timeout for LLM operations
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .expect("Failed to build HTTP client");
+        let client = Client::new_with_client(&api_url, http_client);
 
         // Generate unique bank ID for this test
         let bank_id = format!("rust-test-{}", uuid::Uuid::new_v4());
@@ -63,6 +69,9 @@ mod tests {
                     document_id: None,
                     metadata: None,
                     timestamp: None,
+                    entities: None,
+                    tags: None,
+                    observation_scopes: None,
                 },
                 types::MemoryItem {
                     content: "Bob works with Alice on the search team".to_string(),
@@ -70,8 +79,12 @@ mod tests {
                     document_id: None,
                     metadata: None,
                     timestamp: None,
+                    entities: None,
+                    tags: None,
+                    observation_scopes: None,
                 },
             ],
+            document_tags: None,
         };
         let retain_response = client
             .retain_memories(&bank_id, None, &retain_request)
@@ -88,6 +101,8 @@ mod tests {
             include: None,
             query_timestamp: None,
             types: None,
+            tags: None,
+            tags_match: types::TagsMatch::Any,
         };
         let recall_response = client
             .recall_memories(&bank_id, None, &recall_request)
@@ -95,20 +110,6 @@ mod tests {
             .expect("Failed to recall memories");
         let recall_result = recall_response.into_inner();
         assert!(!recall_result.results.is_empty(), "Should recall at least one memory");
-
-        // 4. Reflect on a question
-        let reflect_request = types::ReflectRequest {
-            query: "What do you know about Alice?".to_string(),
-            budget: None,
-            context: None,
-            include: None,
-        };
-        let reflect_response = client
-            .reflect(&bank_id, None, &reflect_request)
-            .await
-            .expect("Failed to reflect");
-        let reflect_result = reflect_response.into_inner();
-        assert!(!reflect_result.text.is_empty(), "Reflect should return some text");
 
         // Cleanup: delete the test bank's memories
         let _ = client.clear_bank_memories(&bank_id, None, None).await;

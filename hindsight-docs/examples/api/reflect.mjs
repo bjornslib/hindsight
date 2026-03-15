@@ -70,6 +70,31 @@ for (const fact of sourcesResponse.based_on || []) {
 // [/docs:reflect-sources]
 
 
+// [docs:reflect-structured-output]
+// Define JSON schema directly
+const responseSchema = {
+    type: 'object',
+    properties: {
+        recommendation: { type: 'string' },
+        confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+        key_factors: { type: 'array', items: { type: 'string' } },
+        risks: { type: 'array', items: { type: 'string' } },
+    },
+    required: ['recommendation', 'confidence', 'key_factors'],
+};
+
+const structuredResponse = await client.reflect('my-bank', 'What do you know about Alice and her career?', {
+    responseSchema: responseSchema,
+});
+
+// Structured output (if returned)
+if (structuredResponse.structuredOutput) {
+    console.log('Recommendation:', structuredResponse.structuredOutput.recommendation || 'N/A');
+    console.log('Key factors:', structuredResponse.structuredOutput.key_factors || []);
+}
+// [/docs:reflect-structured-output]
+
+
 // =============================================================================
 // Cleanup (not shown in docs)
 // =============================================================================

@@ -7,7 +7,9 @@ Handles insertion of facts into the database.
 import json
 import logging
 
+from ...config import get_config
 from ..memory_engine import fq_table
+from .fact_extraction import _sanitize_text
 from .types import ProcessedFact
 
 logger = logging.getLogger(__name__)
@@ -41,13 +43,15 @@ async def insert_facts_batch(
     contexts = []
     fact_types = []
     confidence_scores = []
-    access_counts = []
     metadata_jsons = []
     chunk_ids = []
     document_ids = []
+    tags_list = []
+    observation_scopes_list = []
+    text_signals_list = []
 
     for fact in facts:
-        fact_texts.append(fact.fact_text)
+        fact_texts.append(_sanitize_text(fact.fact_text))
         # Convert embedding to string for asyncpg vector type
         embeddings.append(str(fact.embedding))
         # event_date: Use occurred_start if available, otherwise use mentioned_at
@@ -56,27 +60,97 @@ async def insert_facts_batch(
         occurred_starts.append(fact.occurred_start)
         occurred_ends.append(fact.occurred_end)
         mentioned_ats.append(fact.mentioned_at)
-        contexts.append(fact.context)
+        contexts.append(_sanitize_text(fact.context))
         fact_types.append(fact.fact_type)
         # confidence_score is only for opinion facts
         confidence_scores.append(1.0 if fact.fact_type == "opinion" else None)
-        access_counts.append(0)  # Initial access count
         metadata_jsons.append(json.dumps(fact.metadata))
         chunk_ids.append(fact.chunk_id)
         # Use per-fact document_id if available, otherwise fallback to batch-level document_id
         document_ids.append(fact.document_id if fact.document_id else document_id)
+        # Convert tags to JSON string for proper batch insertion (PostgreSQL unnest doesn't handle 2D arrays well)
+        tags_list.append(json.dumps(fact.tags if fact.tags else []))
+        # observation_scopes: stored as JSONB (string or 2D array), None if not provided
+        observation_scopes_list.append(
+            json.dumps(fact.observation_scopes) if fact.observation_scopes is not None else None
+        )
+        # Build text_signals: entity names + date tokens for enriched BM25 indexing
+        signal_parts = []
+        if fact.entities:
+            signal_parts.extend(e.name for e in fact.entities)
+        if fact.occurred_start:
+            signal_parts.append(fact.occurred_start.strftime("%B %-d %Y"))
+        if fact.occurred_end and fact.occurred_end != fact.occurred_start:
+            signal_parts.append(fact.occurred_end.strftime("%B %-d %Y"))
+        text_signals_list.append(" ".join(signal_parts) if signal_parts else None)
 
     # Batch insert all facts
+    # Note: tags are passed as JSON strings and converted back to varchar[] via jsonb_array_elements_text + array_agg
+    # Query varies based on text search backend
+    config = get_config()
+    if config.text_search_extension == "vchord":
+        # VectorChord: manually tokenize and insert search_vector
+        # text_signals (entity names etc.) are included in the tokenize input for enriched BM25
+        query = f"""
+            WITH input_data AS (
+                SELECT * FROM unnest(
+                    $2::text[], $3::vector[], $4::timestamptz[], $5::timestamptz[], $6::timestamptz[], $7::timestamptz[],
+                    $8::text[], $9::text[], $10::float[], $11::jsonb[], $12::text[], $13::text[], $14::jsonb[], $15::jsonb[], $16::text[]
+                ) AS t(text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
+                       context, fact_type, confidence_score, metadata, chunk_id, document_id, tags_json,
+                       observation_scopes_json, text_signals)
+            )
+            INSERT INTO {fq_table("memory_units")} (bank_id, text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
+                                     context, fact_type, confidence_score, metadata, chunk_id, document_id, tags,
+                                     observation_scopes, text_signals, search_vector)
+            SELECT
+                $1,
+                text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
+                context, fact_type, confidence_score, metadata, chunk_id, document_id,
+                COALESCE(
+                    (SELECT array_agg(elem) FROM jsonb_array_elements_text(tags_json) AS elem),
+                    '{{}}'::varchar[]
+                ),
+                observation_scopes_json,
+                text_signals,
+                tokenize(
+                    COALESCE(text, '') || ' ' || COALESCE(context, '') || ' ' || COALESCE(text_signals, ''),
+                    'llmlingua2'
+                )::bm25_catalog.bm25vector
+            FROM input_data
+            RETURNING id
+        """
+    else:  # native or pg_textsearch
+        # Native PostgreSQL: search_vector is GENERATED ALWAYS (expression includes text_signals), don't include it
+        # pg_textsearch: indexes operate on base columns directly, don't populate search_vector
+        query = f"""
+            WITH input_data AS (
+                SELECT * FROM unnest(
+                    $2::text[], $3::vector[], $4::timestamptz[], $5::timestamptz[], $6::timestamptz[], $7::timestamptz[],
+                    $8::text[], $9::text[], $10::float[], $11::jsonb[], $12::text[], $13::text[], $14::jsonb[], $15::jsonb[], $16::text[]
+                ) AS t(text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
+                       context, fact_type, confidence_score, metadata, chunk_id, document_id, tags_json,
+                       observation_scopes_json, text_signals)
+            )
+            INSERT INTO {fq_table("memory_units")} (bank_id, text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
+                                     context, fact_type, confidence_score, metadata, chunk_id, document_id, tags,
+                                     observation_scopes, text_signals)
+            SELECT
+                $1,
+                text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
+                context, fact_type, confidence_score, metadata, chunk_id, document_id,
+                COALESCE(
+                    (SELECT array_agg(elem) FROM jsonb_array_elements_text(tags_json) AS elem),
+                    '{{}}'::varchar[]
+                ),
+                observation_scopes_json,
+                text_signals
+            FROM input_data
+            RETURNING id
+        """
+
     results = await conn.fetch(
-        f"""
-        INSERT INTO {fq_table("memory_units")} (bank_id, text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
-                                 context, fact_type, confidence_score, access_count, metadata, chunk_id, document_id)
-        SELECT $1, * FROM unnest(
-            $2::text[], $3::vector[], $4::timestamptz[], $5::timestamptz[], $6::timestamptz[], $7::timestamptz[],
-            $8::text[], $9::text[], $10::float[], $11::int[], $12::jsonb[], $13::text[], $14::text[]
-        )
-        RETURNING id
-        """,
+        query,
         bank_id,
         fact_texts,
         embeddings,
@@ -87,10 +161,12 @@ async def insert_facts_batch(
         contexts,
         fact_types,
         confidence_scores,
-        access_counts,
         metadata_jsons,
         chunk_ids,
         document_ids,
+        tags_list,
+        observation_scopes_list,
+        text_signals_list,
     )
 
     unit_ids = [str(row["id"]) for row in results]
@@ -109,7 +185,7 @@ async def ensure_bank_exists(conn, bank_id: str) -> None:
     """
     await conn.execute(
         f"""
-        INSERT INTO {fq_table("banks")} (bank_id, disposition, background)
+        INSERT INTO {fq_table("banks")} (bank_id, disposition, mission)
         VALUES ($1, $2::jsonb, $3)
         ON CONFLICT (bank_id) DO UPDATE
         SET updated_at = NOW()
@@ -121,7 +197,13 @@ async def ensure_bank_exists(conn, bank_id: str) -> None:
 
 
 async def handle_document_tracking(
-    conn, bank_id: str, document_id: str, combined_content: str, is_first_batch: bool, retain_params: dict | None = None
+    conn,
+    bank_id: str,
+    document_id: str,
+    combined_content: str,
+    is_first_batch: bool,
+    retain_params: dict | None = None,
+    document_tags: list[str] | None = None,
 ) -> None:
     """
     Handle document tracking in the database.
@@ -133,10 +215,12 @@ async def handle_document_tracking(
         combined_content: Combined content text from all content items
         is_first_batch: Whether this is the first batch (for chunked operations)
         retain_params: Optional parameters passed during retain (context, event_date, etc.)
+        document_tags: Optional list of tags to associate with the document
     """
     import hashlib
 
-    # Calculate content hash
+    # Sanitize and calculate content hash
+    combined_content = _sanitize_text(combined_content) or ""
     content_hash = hashlib.sha256(combined_content.encode()).hexdigest()
 
     # Always delete old document first if it exists (cascades to units and links)
@@ -149,13 +233,14 @@ async def handle_document_tracking(
     # Insert document (or update if exists from concurrent operations)
     await conn.execute(
         f"""
-        INSERT INTO {fq_table("documents")} (id, bank_id, original_text, content_hash, metadata, retain_params)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO {fq_table("documents")} (id, bank_id, original_text, content_hash, metadata, retain_params, tags)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (id, bank_id) DO UPDATE
         SET original_text = EXCLUDED.original_text,
             content_hash = EXCLUDED.content_hash,
             metadata = EXCLUDED.metadata,
             retain_params = EXCLUDED.retain_params,
+            tags = EXCLUDED.tags,
             updated_at = NOW()
         """,
         document_id,
@@ -164,4 +249,5 @@ async def handle_document_tracking(
         content_hash,
         json.dumps({}),  # Empty metadata dict
         json.dumps(retain_params) if retain_params else None,
+        document_tags or [],
     )

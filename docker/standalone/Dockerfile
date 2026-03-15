@@ -2,19 +2,25 @@
 # Supports building API-only, Control Plane-only, or both
 #
 # Build args:
-#   INCLUDE_API=true/false       - Include API (default: true)
-#   INCLUDE_CP=true/false        - Include Control Plane (default: true)
-#   PRELOAD_ML_MODELS=true/false - Pre-download ML models during build (default: true)
+#   INCLUDE_API=true/false         - Include API (default: true)
+#   INCLUDE_CP=true/false          - Include Control Plane (default: true)
+#   INCLUDE_LOCAL_MODELS=true/false - Include local ML models for embeddings/reranking (default: true)
+#                                     Set to false when using external providers (TEI, OpenAI, Cohere)
+#   PRELOAD_ML_MODELS=true/false   - Pre-download ML models during build (default: true)
+#                                     Only effective when INCLUDE_LOCAL_MODELS=true
+#                                     NOTE: tiktoken encodings are ALWAYS preloaded (required for air-gapped deployments)
 #
 # Examples:
 #   docker build -t hindsight .                                          # Both (standalone)
 #   docker build -t hindsight-api --build-arg INCLUDE_CP=false .         # API only
 #   docker build -t hindsight-cp --build-arg INCLUDE_API=false .         # Control Plane only
 #   docker build -t hindsight --build-arg PRELOAD_ML_MODELS=false .      # Skip ML model preload
+#   docker build -t hindsight --build-arg INCLUDE_LOCAL_MODELS=false .   # Skip local ML deps (for external providers)
 
 ARG INCLUDE_API=true
 ARG INCLUDE_CP=true
 ARG PRELOAD_ML_MODELS=true
+ARG INCLUDE_LOCAL_MODELS=true
 
 # =============================================================================
 # Stage: API Builder
@@ -22,6 +28,7 @@ ARG PRELOAD_ML_MODELS=true
 FROM python:3.11-slim AS api-builder
 
 ARG INCLUDE_API
+ARG INCLUDE_LOCAL_MODELS
 RUN if [ "$INCLUDE_API" != "true" ]; then echo "Skipping API build" && exit 0; fi
 
 WORKDIR /app
@@ -39,6 +46,15 @@ COPY hindsight-api/pyproject.toml ./api/
 COPY hindsight-api/README.md ./api/
 
 WORKDIR /app/api
+
+# Remove local ML model dependencies if INCLUDE_LOCAL_MODELS=false
+# This creates a smaller image when using external providers (TEI, OpenAI, Cohere)
+RUN if [ "$INCLUDE_LOCAL_MODELS" != "true" ]; then \
+        echo "Removing local-models dependencies (sentence-transformers, torch, transformers)..." && \
+        sed -i '/"sentence-transformers/d' pyproject.toml && \
+        sed -i '/"transformers/d' pyproject.toml && \
+        sed -i '/"torch/d' pyproject.toml; \
+    fi
 
 # Sync dependencies (will create lock file if needed)
 RUN uv sync
@@ -96,6 +112,10 @@ RUN rm -f package-lock.json && sed -i '/"@vectorize-io\/hindsight-client":/d' pa
 # Copy built SDK directly into node_modules (more reliable than npm link in Docker)
 COPY --from=sdk-builder /app/hindsight-clients/typescript ./node_modules/@vectorize-io/hindsight-client
 
+# Accept base path as build argument for reverse proxy deployments
+# Usage: docker build --build-arg NEXT_PUBLIC_BASE_PATH=/hindsight ...
+ARG NEXT_PUBLIC_BASE_PATH=""
+
 # Build Control Plane - run next build first, then custom standalone copy
 # (The build:standalone script expects a specific path structure that differs in Docker)
 RUN npm exec -- next build
@@ -125,7 +145,6 @@ FROM python:3.11-slim AS api-only
 
 WORKDIR /app
 
-# Install pg0 dependencies (procps provides 'kill' command needed by pg0)
 # Note: libicu version varies by Debian version - try common versions in order
 RUN apt-get update && apt-get install -y \
     curl \
@@ -138,7 +157,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
-# Create non-root user (PostgreSQL cannot run as root)
 RUN useradd -m -s /bin/bash hindsight
 
 # Copy API with virtual environment from builder
@@ -148,30 +166,69 @@ COPY --from=api-builder /app/api /app/api
 COPY docker/standalone/start-all.sh /app/start-all.sh
 RUN chmod +x /app/start-all.sh
 
-# Create data directory for pg0 and set ownership
-RUN mkdir -p /app/data && chown -R hindsight:hindsight /app
+RUN chown -R hindsight:hindsight /app
 
-# Switch to non-root user
 USER hindsight
 
-# Set PATH for hindsight user
+# Create pg0 data directory as hindsight user so that Docker seeds new named
+# volumes with correct ownership (UID 1000) on first use, avoiding the
+# "Permission denied" error when mounting a fresh root-owned volume.
+RUN mkdir -p /home/hindsight/.pg0
+
 ENV PATH="/app/api/.venv/bin:${PATH}"
 
-# Pre-cache PostgreSQL binaries by starting/stopping pg0-embedded
-ENV PG0_HOME=/home/hindsight/.pg0-cache
-
-ENV PG0_HOME=/home/hindsight/.pg0
+# Pre-download tiktoken encoding (ALWAYS - required for token counting even in air-gapped envs)
+# Tiktoken is a core runtime dependency, not an optional ML model
+RUN MAX_RETRIES=3; \
+    RETRY_DELAY=5; \
+    for i in $(seq 1 $MAX_RETRIES); do \
+      echo "Attempt $i/$MAX_RETRIES: Downloading tiktoken encoding..."; \
+      /app/api/.venv/bin/python -c "\
+import tiktoken; \
+print('Downloading cl100k_base encoding...'); \
+tiktoken.get_encoding('cl100k_base'); \
+print('Tiktoken encoding cached successfully')" && break; \
+      if [ $i -lt $MAX_RETRIES ]; then \
+        echo "Attempt $i failed, retrying in ${RETRY_DELAY}s..."; \
+        sleep $RETRY_DELAY; \
+        RETRY_DELAY=$((RETRY_DELAY * 2)); \
+      fi; \
+    done; \
+    if [ $i -eq $MAX_RETRIES ]; then \
+      echo "ERROR: Failed to download tiktoken encoding after $MAX_RETRIES attempts"; \
+      exit 1; \
+    fi
 
 # Pre-download ML models to avoid runtime download (conditional)
+# Only runs if both PRELOAD_ML_MODELS=true AND INCLUDE_LOCAL_MODELS=true
+# Includes retry logic with exponential backoff for transient network failures
 ARG PRELOAD_ML_MODELS
-RUN if [ "$PRELOAD_ML_MODELS" = "true" ]; then \
-    /app/api/.venv/bin/python -c "\
+ARG INCLUDE_LOCAL_MODELS
+ENV HF_HUB_DOWNLOAD_TIMEOUT=600
+RUN if [ "$PRELOAD_ML_MODELS" = "true" ] && [ "$INCLUDE_LOCAL_MODELS" = "true" ]; then \
+    MAX_RETRIES=3; \
+    RETRY_DELAY=10; \
+    for i in $(seq 1 $MAX_RETRIES); do \
+      echo "Attempt $i/$MAX_RETRIES: Downloading ML models..."; \
+      /app/api/.venv/bin/python -c "\
+import os; os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '600'; \
 from sentence_transformers import SentenceTransformer, CrossEncoder; \
 print('Downloading embedding model...'); \
 SentenceTransformer('BAAI/bge-small-en-v1.5'); \
 print('Downloading cross-encoder model...'); \
 CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2'); \
-print('Models cached successfully')"; \
+print('Models cached successfully')" && break; \
+      if [ $i -lt $MAX_RETRIES ]; then \
+        echo "Attempt $i failed, retrying in ${RETRY_DELAY}s..."; \
+        sleep $RETRY_DELAY; \
+        RETRY_DELAY=$((RETRY_DELAY * 2)); \
+      fi; \
+    done; \
+    if [ $i -eq $MAX_RETRIES ] && ! /app/api/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')" 2>/dev/null; then \
+      echo "ERROR: Failed to download models after $MAX_RETRIES attempts"; \
+      exit 1; \
+    fi; \
+    elif [ "$INCLUDE_LOCAL_MODELS" != "true" ]; then echo "Skipping ML model preload (local-models not included)"; \
     else echo "Skipping ML model preload"; fi
 
 EXPOSE 8888
@@ -182,6 +239,10 @@ ENV HINDSIGHT_API_LOG_LEVEL=info
 ENV HINDSIGHT_ENABLE_API=true
 ENV HINDSIGHT_ENABLE_CP=false
 ENV PYTHONUNBUFFERED=1
+# Suppress verbose transformers/HuggingFace model loading warnings
+ENV TRANSFORMERS_VERBOSITY=error
+ENV HF_HUB_VERBOSITY=error
+ENV TOKENIZERS_PARALLELISM=false
 
 CMD ["/app/start-all.sh"]
 
@@ -226,7 +287,7 @@ FROM python:3.11-slim AS standalone
 
 WORKDIR /app
 
-# Install Node.js, curl, uv, and pg0 dependencies (procps provides 'kill' command needed by pg0)
+# Install Node.js, curl, uv, and system dependencies
 # Note: libicu version varies by Debian version - try common versions in order
 RUN apt-get update && apt-get install -y \
     curl \
@@ -241,7 +302,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
-# Create non-root user (PostgreSQL cannot run as root)
 RUN useradd -m -s /bin/bash hindsight
 
 # Copy API with virtual environment from builder
@@ -262,37 +322,69 @@ WORKDIR /app
 COPY docker/standalone/start-all.sh /app/start-all.sh
 RUN chmod +x /app/start-all.sh
 
-# Create data directory for pg0 and set ownership
-RUN mkdir -p /app/data && chown -R hindsight:hindsight /app
+RUN chown -R hindsight:hindsight /app
 
-# Switch to non-root user
 USER hindsight
 
-# Set PATH for hindsight user
+# Create pg0 data directory as hindsight user so that Docker seeds new named
+# volumes with correct ownership (UID 1000) on first use, avoiding the
+# "Permission denied" error when mounting a fresh root-owned volume.
+RUN mkdir -p /home/hindsight/.pg0
+
 ENV PATH="/app/api/.venv/bin:${PATH}"
 
-# Pre-cache PostgreSQL binaries by starting/stopping pg0-embedded
-ENV PG0_HOME=/home/hindsight/.pg0-cache
-RUN /app/api/.venv/bin/python -c "\
-from pg0 import Pg0; \
-print('Pre-caching PostgreSQL binaries...'); \
-pg = Pg0(name='hindsight', port=5555, username='hindsight', password='hindsight', database='hindsight'); \
-pg.start(); \
-pg.stop(); \
-print('PostgreSQL pre-cached to PG0_HOME')" || echo "Pre-download skipped"
-
-ENV PG0_HOME=/home/hindsight/.pg0
+# Pre-download tiktoken encoding (ALWAYS - required for token counting even in air-gapped envs)
+# Tiktoken is a core runtime dependency, not an optional ML model
+RUN MAX_RETRIES=3; \
+    RETRY_DELAY=5; \
+    for i in $(seq 1 $MAX_RETRIES); do \
+      echo "Attempt $i/$MAX_RETRIES: Downloading tiktoken encoding..."; \
+      /app/api/.venv/bin/python -c "\
+import tiktoken; \
+print('Downloading cl100k_base encoding...'); \
+tiktoken.get_encoding('cl100k_base'); \
+print('Tiktoken encoding cached successfully')" && break; \
+      if [ $i -lt $MAX_RETRIES ]; then \
+        echo "Attempt $i failed, retrying in ${RETRY_DELAY}s..."; \
+        sleep $RETRY_DELAY; \
+        RETRY_DELAY=$((RETRY_DELAY * 2)); \
+      fi; \
+    done; \
+    if [ $i -eq $MAX_RETRIES ]; then \
+      echo "ERROR: Failed to download tiktoken encoding after $MAX_RETRIES attempts"; \
+      exit 1; \
+    fi
 
 # Pre-download ML models to avoid runtime download (conditional)
+# Only runs if both PRELOAD_ML_MODELS=true AND INCLUDE_LOCAL_MODELS=true
+# Includes retry logic with exponential backoff for transient network failures
 ARG PRELOAD_ML_MODELS
-RUN if [ "$PRELOAD_ML_MODELS" = "true" ]; then \
-    /app/api/.venv/bin/python -c "\
+ARG INCLUDE_LOCAL_MODELS
+ENV HF_HUB_DOWNLOAD_TIMEOUT=600
+RUN if [ "$PRELOAD_ML_MODELS" = "true" ] && [ "$INCLUDE_LOCAL_MODELS" = "true" ]; then \
+    MAX_RETRIES=3; \
+    RETRY_DELAY=10; \
+    for i in $(seq 1 $MAX_RETRIES); do \
+      echo "Attempt $i/$MAX_RETRIES: Downloading ML models..."; \
+      /app/api/.venv/bin/python -c "\
+import os; os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '600'; \
 from sentence_transformers import SentenceTransformer, CrossEncoder; \
 print('Downloading embedding model...'); \
 SentenceTransformer('BAAI/bge-small-en-v1.5'); \
 print('Downloading cross-encoder model...'); \
 CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2'); \
-print('Models cached successfully')"; \
+print('Models cached successfully')" && break; \
+      if [ $i -lt $MAX_RETRIES ]; then \
+        echo "Attempt $i failed, retrying in ${RETRY_DELAY}s..."; \
+        sleep $RETRY_DELAY; \
+        RETRY_DELAY=$((RETRY_DELAY * 2)); \
+      fi; \
+    done; \
+    if [ $i -eq $MAX_RETRIES ] && ! /app/api/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')" 2>/dev/null; then \
+      echo "ERROR: Failed to download models after $MAX_RETRIES attempts"; \
+      exit 1; \
+    fi; \
+    elif [ "$INCLUDE_LOCAL_MODELS" != "true" ]; then echo "Skipping ML model preload (local-models not included)"; \
     else echo "Skipping ML model preload"; fi
 
 EXPOSE 8888 9999
@@ -305,6 +397,10 @@ ENV HINDSIGHT_CP_DATAPLANE_API_URL=http://localhost:8888
 ENV HINDSIGHT_ENABLE_API=true
 ENV HINDSIGHT_ENABLE_CP=true
 ENV PYTHONUNBUFFERED=1
+# Suppress verbose transformers/HuggingFace model loading warnings
+ENV TRANSFORMERS_VERBOSITY=error
+ENV HF_HUB_VERBOSITY=error
+ENV TOKENIZERS_PARALLELISM=false
 
 CMD ["/app/start-all.sh"]
 

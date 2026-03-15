@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from hindsight_api.engine.memory_engine import Budget
     from hindsight_api.engine.response_models import RecallResult, ReflectResult
+    from hindsight_api.engine.search.tags import TagsMatch
     from hindsight_api.models import RequestContext
 
 
@@ -48,6 +49,7 @@ class MemoryEngineInterface(ABC):
         contents: list[dict[str, Any]],
         *,
         request_context: "RequestContext",
+        document_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Retain a batch of memory items.
@@ -55,8 +57,9 @@ class MemoryEngineInterface(ABC):
         Args:
             bank_id: The memory bank ID.
             contents: List of content dicts with 'content', optional 'event_date',
-                     'context', 'metadata', 'document_id'.
+                     'context', 'metadata', 'document_id', and per-item 'tags'.
             request_context: Request context for authentication.
+            document_tags: Optional tags applied to all items in the batch.
 
         Returns:
             Dict with processing results.
@@ -110,6 +113,8 @@ class MemoryEngineInterface(ABC):
         *,
         budget: "Budget | None" = None,
         context: str | None = None,
+        max_tokens: int = 4096,
+        response_schema: dict | None = None,
         request_context: "RequestContext",
     ) -> "ReflectResult":
         """
@@ -120,6 +125,8 @@ class MemoryEngineInterface(ABC):
             query: The question to reflect on.
             budget: Search budget for retrieving context.
             context: Additional context for the reflection.
+            max_tokens: Maximum tokens for the response.
+            response_schema: Optional JSON Schema for structured output.
             request_context: Request context for authentication.
 
         Returns:
@@ -156,14 +163,14 @@ class MemoryEngineInterface(ABC):
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """
-        Get bank profile including disposition and background.
+        Get bank profile including disposition and mission.
 
         Args:
             bank_id: The memory bank ID.
             request_context: Request context for authentication.
 
         Returns:
-            Bank profile dict.
+            Bank profile dict with bank_id, name, disposition, and mission.
         """
         ...
 
@@ -186,25 +193,44 @@ class MemoryEngineInterface(ABC):
         ...
 
     @abstractmethod
-    async def merge_bank_background(
+    async def merge_bank_mission(
         self,
         bank_id: str,
         new_info: str,
         *,
-        update_disposition: bool = True,
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """
-        Merge new background information into bank profile.
+        Merge new mission information into bank profile.
 
         Args:
             bank_id: The memory bank ID.
-            new_info: New background information to merge.
-            update_disposition: Whether to infer disposition from background.
+            new_info: New mission information to merge.
             request_context: Request context for authentication.
 
         Returns:
-            Updated background info.
+            Updated mission info.
+        """
+        ...
+
+    @abstractmethod
+    async def set_bank_mission(
+        self,
+        bank_id: str,
+        mission: str,
+        *,
+        request_context: "RequestContext",
+    ) -> dict[str, Any]:
+        """
+        Set the bank's mission (replaces existing).
+
+        Args:
+            bank_id: The memory bank ID.
+            mission: The mission text.
+            request_context: Request context for authentication.
+
+        Returns:
+            Dict with bank_id and mission.
         """
         ...
 
@@ -285,6 +311,7 @@ class MemoryEngineInterface(ABC):
         bank_id: str,
         *,
         fact_type: str | None = None,
+        limit: int = 1000,
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """
@@ -293,10 +320,11 @@ class MemoryEngineInterface(ABC):
         Args:
             bank_id: The memory bank ID.
             fact_type: Filter by fact type.
+            limit: Maximum number of items to return (default: 1000).
             request_context: Request context for authentication.
 
         Returns:
-            Dict with nodes, edges, table_rows, total_units.
+            Dict with nodes, edges, table_rows, total_units, limit.
         """
         ...
 
@@ -310,6 +338,8 @@ class MemoryEngineInterface(ABC):
         bank_id: str,
         *,
         search_query: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: "TagsMatch" = "any_strict",
         limit: int = 100,
         offset: int = 0,
         request_context: "RequestContext",
@@ -319,7 +349,9 @@ class MemoryEngineInterface(ABC):
 
         Args:
             bank_id: The memory bank ID.
-            search_query: Search query.
+            search_query: Case-insensitive substring filter on document ID.
+            tags: Filter by tags.
+            tags_match: How to match tags (any, all, any_strict, all_strict).
             limit: Maximum results.
             offset: Pagination offset.
             request_context: Request context for authentication.
@@ -400,61 +432,20 @@ class MemoryEngineInterface(ABC):
         bank_id: str,
         *,
         limit: int = 100,
+        offset: int = 0,
         request_context: "RequestContext",
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """
-        List entities for a bank.
+        List entities for a bank with pagination.
 
         Args:
             bank_id: The memory bank ID.
             limit: Maximum results.
+            offset: Offset for pagination.
             request_context: Request context for authentication.
 
         Returns:
-            List of entity dicts.
-        """
-        ...
-
-    @abstractmethod
-    async def get_entity_observations(
-        self,
-        bank_id: str,
-        entity_id: str,
-        *,
-        limit: int = 10,
-        request_context: "RequestContext",
-    ) -> list[Any]:
-        """
-        Get observations for an entity.
-
-        Args:
-            bank_id: The memory bank ID.
-            entity_id: The entity ID.
-            limit: Maximum observations.
-            request_context: Request context for authentication.
-
-        Returns:
-            List of EntityObservation objects.
-        """
-        ...
-
-    @abstractmethod
-    async def regenerate_entity_observations(
-        self,
-        bank_id: str,
-        entity_id: str,
-        entity_name: str,
-        *,
-        request_context: "RequestContext",
-    ) -> None:
-        """
-        Regenerate observations for an entity.
-
-        Args:
-            bank_id: The memory bank ID.
-            entity_id: The entity ID.
-            entity_name: The entity's canonical name.
-            request_context: Request context for authentication.
+            Dict with items, total, limit, offset.
         """
         ...
 
@@ -510,7 +501,7 @@ class MemoryEngineInterface(ABC):
         bank_id: str,
         *,
         request_context: "RequestContext",
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """
         List async operations for a bank.
 
@@ -519,7 +510,7 @@ class MemoryEngineInterface(ABC):
             request_context: Request context for authentication.
 
         Returns:
-            List of operation dicts with id, task_type, status, etc.
+            Dict with 'total' (int) and 'operations' (list of operation dicts).
         """
         ...
 
@@ -553,16 +544,16 @@ class MemoryEngineInterface(ABC):
         bank_id: str,
         *,
         name: str | None = None,
-        background: str | None = None,
+        mission: str | None = None,
         request_context: "RequestContext",
     ) -> dict[str, Any]:
         """
-        Update bank name and/or background.
+        Update bank name and/or mission.
 
         Args:
             bank_id: The memory bank ID.
             name: New bank name (optional).
-            background: New background text (optional, replaces existing).
+            mission: New mission text (optional, replaces existing).
             request_context: Request context for authentication.
 
         Returns:
@@ -577,6 +568,7 @@ class MemoryEngineInterface(ABC):
         contents: list[dict[str, Any]],
         *,
         request_context: "RequestContext",
+        document_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Submit a batch retain operation to run asynchronously.
@@ -585,6 +577,7 @@ class MemoryEngineInterface(ABC):
             bank_id: The memory bank ID.
             contents: List of content dicts to retain.
             request_context: Request context for authentication.
+            document_tags: Optional tags applied to all items in the async batch.
 
         Returns:
             Dict with operation_id and items_count.

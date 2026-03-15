@@ -13,47 +13,76 @@ fn convert_31_to_30(spec: &mut serde_json::Value) {
     convert_anyof_to_nullable(spec);
 }
 
+/// Remove paths with multipart/form-data content type (not supported by progenitor)
+fn filter_multipart_endpoints(spec: &mut serde_json::Value) {
+    if let Some(paths) = spec.get_mut("paths").and_then(|v| v.as_object_mut()) {
+        let mut paths_to_remove = Vec::new();
+
+        for (path_name, path_item) in paths.iter() {
+            if let Some(operations) = path_item.as_object() {
+                for (_method, operation) in operations.iter() {
+                    if let Some(request_body) = operation.get("requestBody") {
+                        if let Some(content) = request_body.get("content") {
+                            if let Some(content_obj) = content.as_object() {
+                                if content_obj.contains_key("multipart/form-data") {
+                                    eprintln!("Filtering out endpoint with multipart/form-data: {}", path_name);
+                                    paths_to_remove.push(path_name.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove the paths
+        for path in paths_to_remove {
+            paths.remove(&path);
+        }
+    }
+}
+
 fn convert_anyof_to_nullable(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(obj) => {
             // Check if this object has anyOf with null and process it
-            let should_convert = obj.get("anyOf")
+            let has_null_in_anyof = obj.get("anyOf")
                 .and_then(|v| v.as_array())
                 .map(|array| {
-                    if array.len() == 2 {
-                        let has_null = array.iter().any(|v| {
-                            v.get("type")
-                                .and_then(|t| t.as_str())
-                                .map(|s| s == "null")
-                                .unwrap_or(false)
-                        });
-                        has_null
-                    } else {
-                        false
-                    }
+                    array.iter().any(|v| {
+                        v.get("type")
+                            .and_then(|t| t.as_str())
+                            .map(|s| s == "null")
+                            .unwrap_or(false)
+                    })
                 })
                 .unwrap_or(false);
 
-            if should_convert {
+            if has_null_in_anyof {
                 // Clone the anyOf array to avoid borrow issues
                 if let Some(any_of) = obj.get("anyOf").cloned() {
                     if let Some(array) = any_of.as_array() {
-                        // Find the non-null schema
-                        if let Some(non_null_schema) = array.iter().find(|v| {
+                        let non_null_schemas: Vec<_> = array.iter().filter(|v| {
                             v.get("type")
                                 .and_then(|t| t.as_str())
                                 .map(|s| s != "null")
                                 .unwrap_or(true)
-                        }).cloned() {
-                            // Replace anyOf with the non-null schema + nullable: true
-                            obj.remove("anyOf");
-                            if let Some(non_null_obj) = non_null_schema.as_object() {
+                        }).cloned().collect();
+
+                        obj.remove("anyOf");
+                        if non_null_schemas.len() == 1 {
+                            // Single non-null type: inline it with nullable: true
+                            if let Some(non_null_obj) = non_null_schemas[0].as_object() {
                                 for (k, v) in non_null_obj.iter() {
                                     obj.insert(k.clone(), v.clone());
                                 }
                             }
-                            obj.insert("nullable".to_string(), serde_json::json!(true));
+                        } else {
+                            // Multiple non-null types: keep anyOf with nulls removed
+                            obj.insert("anyOf".to_string(), serde_json::json!(non_null_schemas));
                         }
+                        obj.insert("nullable".to_string(), serde_json::json!(true));
                     }
                 }
             }
@@ -73,13 +102,15 @@ fn convert_anyof_to_nullable(value: &mut serde_json::Value) {
 }
 
 fn main() {
-    // Get the OpenAPI spec path from the project root (two levels up)
+    // Get the OpenAPI spec path from hindsight-docs/static (single source of truth)
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let openapi_path = manifest_dir
         .parent()
         .unwrap()
         .parent()
         .unwrap()
+        .join("hindsight-docs")
+        .join("static")
         .join("openapi.json");
 
     // Tell Cargo to rebuild if the OpenAPI spec changes
@@ -100,6 +131,9 @@ fn main() {
             convert_31_to_30(&mut spec_json);
         }
     }
+
+    // Filter out multipart/form-data endpoints (progenitor doesn't support them)
+    filter_multipart_endpoints(&mut spec_json);
 
     // Now parse as OpenAPI struct
     let spec: openapiv3::OpenAPI = serde_json::from_value(spec_json)

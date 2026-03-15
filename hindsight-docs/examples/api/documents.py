@@ -27,15 +27,14 @@ client.retain(
     document_id="meeting-2024-03-15"
 )
 
-# Batch retain for a document
+# Batch retain for a document with different sections
 client.retain_batch(
     bank_id="my-bank",
     items=[
-        {"content": "Item 1: Product launch delayed to Q2"},
-        {"content": "Item 2: New hiring targets announced"},
-        {"content": "Item 3: Budget approved for ML team"}
-    ],
-    document_id="meeting-2024-03-15"
+        {"content": "Item 1: Product launch delayed to Q2", "document_id": "meeting-2024-03-15-section-1"},
+        {"content": "Item 2: New hiring targets announced", "document_id": "meeting-2024-03-15-section-2"},
+        {"content": "Item 3: Budget approved for ML team", "document_id": "meeting-2024-03-15-section-3"}
+    ]
 )
 # [/docs:document-retain]
 
@@ -57,8 +56,47 @@ client.retain(
 # [/docs:document-update]
 
 
-# [docs:document-get]
+# [docs:document-list]
+from hindsight_client_api import ApiClient, Configuration
+from hindsight_client_api.api import DocumentsApi
+
+async def list_documents_example():
+    config = Configuration(host="http://localhost:8888")
+    api_client = ApiClient(config)
+    api = DocumentsApi(api_client)
+
+    # List all documents
+    result = await api.list_documents(bank_id="my-bank")
+    print(f"Total documents: {result.total}")
+
+    # Filter by document ID substring
+    result = await api.list_documents(bank_id="my-bank", q="report")
+
+    # Filter by tags — only docs tagged with "team-a" (untagged excluded)
+    result = await api.list_documents(
+        bank_id="my-bank",
+        tags=["team-a"],
+        tags_match="any_strict",
+    )
+
+    # Combine ID search and tags
+    result = await api.list_documents(
+        bank_id="my-bank",
+        q="meeting",
+        tags=["team-a", "team-b"],
+        tags_match="all_strict",  # must have both tags
+    )
+
+    # Paginate
+    result = await api.list_documents(bank_id="my-bank", limit=20, offset=40)
+    print(f"Page items: {len(result.items)}")
+
 import asyncio
+asyncio.run(list_documents_example())
+# [/docs:document-list]
+
+
+# [docs:document-get]
 from hindsight_client_api import ApiClient, Configuration
 from hindsight_client_api.api import DocumentsApi
 

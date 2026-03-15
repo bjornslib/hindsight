@@ -96,9 +96,42 @@ class DefaultExtensionContext(ExtensionContext):
 
     async def run_migration(self, schema: str) -> None:
         """Run migrations for a specific schema."""
-        from hindsight_api.migrations import run_migrations
+        from hindsight_api.config import get_config
+        from hindsight_api.migrations import (
+            ensure_embedding_dimension,
+            ensure_text_search_extension,
+            ensure_vector_extension,
+            run_migrations,
+        )
 
-        run_migrations(self._database_url, schema=schema)
+        # Prefer getting URL from memory engine (handles pg0 case where URL is set after init)
+        db_url = self._database_url
+        if self._memory_engine is not None:
+            engine_url = getattr(self._memory_engine, "db_url", None)
+            if engine_url:
+                db_url = engine_url
+
+        run_migrations(db_url, schema=schema)
+
+        # Get config for vector extension setting
+        config = get_config()
+
+        # Ensure embedding column dimension matches the model's dimension
+        # This is needed because migrations create columns with default dimension
+        if self._memory_engine is not None:
+            embeddings = getattr(self._memory_engine, "embeddings", None)
+            if embeddings is not None:
+                dimension = getattr(embeddings, "dimension", None)
+                if dimension is not None:
+                    ensure_embedding_dimension(
+                        db_url, dimension, schema=schema, vector_extension=config.vector_extension
+                    )
+
+        # Ensure vector indexes match the configured extension
+        ensure_vector_extension(db_url, vector_extension=config.vector_extension, schema=schema)
+
+        # Ensure text search columns/indexes match the configured extension
+        ensure_text_search_extension(db_url, text_search_extension=config.text_search_extension, schema=schema)
 
     def get_memory_engine(self) -> "MemoryEngineInterface":
         """Get the memory engine interface."""

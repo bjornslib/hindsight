@@ -22,12 +22,12 @@ await client.retain('my-bank', 'Alice presented the Q4 roadmap...', {
     document_id: 'meeting-2024-03-15'
 });
 
-// Batch retain
+// Batch retain for a document with different sections
 await client.retainBatch('my-bank', [
-    { content: 'Item 1: Product launch delayed to Q2' },
-    { content: 'Item 2: New hiring targets announced' },
-    { content: 'Item 3: Budget approved for ML team' }
-], { documentId: 'meeting-2024-03-15' });
+    { content: 'Item 1: Product launch delayed to Q2', document_id: 'meeting-2024-03-15-section-1' },
+    { content: 'Item 2: New hiring targets announced', document_id: 'meeting-2024-03-15-section-2' },
+    { content: 'Item 3: Budget approved for ML team', document_id: 'meeting-2024-03-15-section-3' }
+]);
 // [/docs:document-retain]
 
 
@@ -44,14 +44,57 @@ await client.retain('my-bank', 'Project deadline: April 15 (extended)', {
 // [/docs:document-update]
 
 
-// [docs:document-get]
+// [docs:document-list]
 const apiClient = createClient(createConfig({ baseUrl: 'http://localhost:8888' }));
 
-// Get document to expand context from recall results
-const { data: doc } = await sdk.getDocument({
+// List all documents
+const { data: allDocs } = await sdk.listDocuments({
     client: apiClient,
-    path: { bank_id: 'my-bank', document_id: 'meeting-2024-03-15' }
+    path: { bank_id: 'my-bank' }
 });
+console.log(`Total documents: ${allDocs.total}`);
+
+// Filter by document ID substring
+const { data: reportDocs } = await sdk.listDocuments({
+    client: apiClient,
+    path: { bank_id: 'my-bank' },
+    query: { q: 'report' }
+});
+
+// Filter by tags — only docs tagged with "team-a" (untagged excluded)
+const { data: taggedDocs } = await sdk.listDocuments({
+    client: apiClient,
+    path: { bank_id: 'my-bank' },
+    query: { tags: ['team-a'], tags_match: 'any_strict' }
+});
+
+// Combine ID search and tags
+const { data: filtered } = await sdk.listDocuments({
+    client: apiClient,
+    path: { bank_id: 'my-bank' },
+    query: { q: 'meeting', tags: ['team-a', 'team-b'], tags_match: 'all_strict' }
+});
+
+// Paginate
+const { data: page } = await sdk.listDocuments({
+    client: apiClient,
+    path: { bank_id: 'my-bank' },
+    query: { limit: 20, offset: 40 }
+});
+console.log(`Page items: ${page.items.length}`);
+// [/docs:document-list]
+
+
+// [docs:document-get]
+// Get document to expand context from recall results
+const { data: doc, error } = await sdk.getDocument({
+    client: apiClient,
+    path: { bank_id: 'my-bank', document_id: 'meeting-2024-03-15-section-1' }
+});
+
+if (error) {
+    throw new Error(`Failed to get document: ${JSON.stringify(error)}`);
+}
 
 console.log(`Document: ${doc.id}`);
 console.log(`Original text: ${doc.original_text}`);
@@ -64,7 +107,7 @@ console.log(`Created: ${doc.created_at}`);
 // Delete document and all its memories
 const { data: deleteResult } = await sdk.deleteDocument({
     client: apiClient,
-    path: { bank_id: 'my-bank', document_id: 'meeting-2024-03-15' }
+    path: { bank_id: 'my-bank', document_id: 'meeting-2024-03-15-section-1' }
 });
 
 console.log(`Deleted ${deleteResult.memory_units_deleted} memories`);

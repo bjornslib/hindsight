@@ -6,8 +6,6 @@ import { useBank } from "@/lib/bank-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  Copy,
-  Check,
   Calendar,
   ZoomIn,
   ZoomOut,
@@ -18,6 +16,14 @@ import {
   Settings2,
   Eye,
   EyeOff,
+  RefreshCw,
+  CheckCircle,
+  Clock,
+  Network,
+  List,
+  Search,
+  Tag,
+  X,
 } from "lucide-react";
 import {
   Table,
@@ -31,9 +37,10 @@ import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { MemoryDetailPanel } from "./memory-detail-panel";
+import { MemoryDetailModal } from "./memory-detail-modal";
 import { Graph2D, convertHindsightGraphData, GraphNode } from "./graph-2d";
 
-type FactType = "world" | "experience" | "opinion";
+type FactType = "world" | "experience" | "observation";
 type ViewMode = "graph" | "table" | "timeline";
 
 interface DataViewProps {
@@ -46,15 +53,25 @@ export function DataView({ factType }: DataViewProps) {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedGraphNode, setSelectedGraphNode] = useState<any>(null);
-  const [selectedTableMemory, setSelectedTableMemory] = useState<any>(null);
+  const [modalMemoryId, setModalMemoryId] = useState<string | null>(null);
   const itemsPerPage = 100;
+
+  // Fetch limit state - how many memories to load from the API
+  const [fetchLimit, setFetchLimit] = useState(1000);
+
+  // Consolidation status for mental models
+  const [consolidationStatus, setConsolidationStatus] = useState<{
+    pending_consolidation: number;
+    last_consolidated_at: string | null;
+  } | null>(null);
 
   // Graph controls state
   const [showLabels, setShowLabels] = useState(true);
-  const [maxNodes, setMaxNodes] = useState<number | undefined>(50);
+  const [maxNodes, setMaxNodes] = useState<number | undefined>(undefined);
   const [showControlPanel, setShowControlPanel] = useState(true);
   const [visibleLinkTypes, setVisibleLinkTypes] = useState<Set<string>>(
     new Set(["semantic", "temporal", "entity", "causal"])
@@ -83,17 +100,7 @@ export function DataView({ factType }: DataViewProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedGraphNode]);
 
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedId(text);
-      setTimeout(() => setCopiedId(null), 2000);
-    } catch (err) {
-      console.error("Failed to copy:", err);
-    }
-  };
-
-  const loadData = async () => {
+  const loadData = async (limit?: number, q?: string, tags?: string[]) => {
     if (!currentBank) return;
 
     setLoading(true);
@@ -101,29 +108,43 @@ export function DataView({ factType }: DataViewProps) {
       const graphData: any = await client.getGraph({
         bank_id: currentBank,
         type: factType,
+        limit: limit ?? fetchLimit,
+        q,
+        tags,
       });
       setData(graphData);
+
+      // Fetch consolidation status for observations
+      if (factType === "observation") {
+        const stats: any = await client.getBankStats(currentBank);
+        setConsolidationStatus({
+          pending_consolidation: stats.pending_consolidation || 0,
+          last_consolidated_at: stats.last_consolidated_at || null,
+        });
+      }
     } catch (error) {
-      console.error("Error loading data:", error);
-      alert(`Error loading ${factType} data: ` + (error as Error).message);
+      // Error toast is shown automatically by the API client interceptor
     } finally {
       setLoading(false);
     }
   };
 
-  // Filter table rows based on search query (text only)
+  const addTagFilter = (tag: string) => {
+    const trimmed = tag.trim();
+    if (trimmed && !tagFilters.includes(trimmed)) {
+      setTagFilters((prev) => [...prev, trimmed]);
+    }
+    setTagInput("");
+  };
+
+  const removeTagFilter = (tag: string) => {
+    setTagFilters((prev) => prev.filter((t) => t !== tag));
+  };
+
+  // Table rows are already filtered server-side
   const filteredTableRows = useMemo(() => {
-    if (!data?.table_rows) return [];
-    if (!searchQuery) return data.table_rows;
-
-    const query = searchQuery.toLowerCase();
-    return data.table_rows.filter((row: any) => row.text?.toLowerCase().includes(query));
-  }, [data, searchQuery]);
-
-  // Get filtered node IDs for graph filtering
-  const filteredNodeIds = useMemo(() => {
-    return new Set(filteredTableRows.map((row: any) => row.id));
-  }, [filteredTableRows]);
+    return data?.table_rows ?? [];
+  }, [data]);
 
   // Helper to get normalized link type
   const getLinkTypeCategory = (type: string | undefined): string => {
@@ -133,32 +154,19 @@ export function DataView({ factType }: DataViewProps) {
     return "semantic";
   };
 
-  // Convert data for Graph2D with filtering
+  // Convert data for Graph2D (graph data is already filtered server-side)
   const graph2DData = useMemo(() => {
     if (!data) return { nodes: [], links: [] };
     const fullData = convertHindsightGraphData(data);
 
-    let nodes = fullData.nodes;
-    let links = fullData.links;
-
-    // Filter nodes based on search query
-    if (searchQuery) {
-      const filteredNodes = fullData.nodes.filter((node) => filteredNodeIds.has(node.id));
-      const filteredNodeIdSet = new Set(filteredNodes.map((n) => n.id));
-      nodes = filteredNodes;
-      links = fullData.links.filter(
-        (link) => filteredNodeIdSet.has(link.source) && filteredNodeIdSet.has(link.target)
-      );
-    }
-
     // Filter links based on visible link types
-    links = links.filter((link) => {
+    const links = fullData.links.filter((link) => {
       const category = getLinkTypeCategory(link.type);
       return visibleLinkTypes.has(category);
     });
 
-    return { nodes, links };
-  }, [data, searchQuery, filteredNodeIds, visibleLinkTypes]);
+    return { nodes: fullData.nodes, links };
+  }, [data, visibleLinkTypes]);
 
   // Calculate link stats for display
   const linkStats = useMemo(() => {
@@ -216,10 +224,39 @@ export function DataView({ factType }: DataViewProps) {
     return "#0074d9"; // Brand primary blue for semantic
   }, []);
 
-  // Reset to first page when search query changes
+  // Reset to first page when filters change
   useEffect(() => {
     setCurrentPage(1);
+  }, [searchQuery, tagFilters]);
+
+  // Debounce ref for text search
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Trigger server-side reload when text filter changes (debounced 300ms)
+  useEffect(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+    searchDebounceRef.current = setTimeout(() => {
+      if (currentBank) {
+        loadData(
+          undefined,
+          searchQuery || undefined,
+          tagFilters.length > 0 ? tagFilters : undefined
+        );
+      }
+    }, 300);
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
   }, [searchQuery]);
+
+  // Trigger server-side reload immediately when tag filters change
+  useEffect(() => {
+    if (currentBank) {
+      loadData(undefined, searchQuery || undefined, tagFilters.length > 0 ? tagFilters : undefined);
+    }
+  }, [tagFilters]);
 
   // Auto-load data when component mounts or factType/currentBank changes
   useEffect(() => {
@@ -228,64 +265,170 @@ export function DataView({ factType }: DataViewProps) {
     }
   }, [factType, currentBank]);
 
+  // Enforce 50 node limit to prevent UI instability, default to 20 or max whichever is smaller
+  useEffect(() => {
+    if (data && maxNodes === undefined) {
+      if (graph2DData.nodes.length > 50) {
+        // Always set maxNodes to 20 when we have >50 nodes (never leave as undefined)
+        setMaxNodes(20);
+      } else if (graph2DData.nodes.length > 20) {
+        setMaxNodes(20);
+      }
+      // If ≤20 nodes, leave maxNodes undefined to show all
+    }
+  }, [data, graph2DData.nodes.length, maxNodes]);
+
   return (
     <div>
       {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="text-center">
-            <div className="text-4xl mb-2">⏳</div>
-            <div className="text-sm text-muted-foreground">Loading memories...</div>
-          </div>
+        <div className="text-center py-12">
+          <RefreshCw className="w-8 h-8 mx-auto mb-3 text-muted-foreground animate-spin" />
+          <p className="text-muted-foreground">Loading memories...</p>
         </div>
       ) : data ? (
         <>
-          {/* Always visible filter */}
-          <div className="mb-4">
-            <Input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter memories by text..."
-              className="max-w-md"
-            />
+          {/* Always visible filters */}
+          <div className="mb-4 space-y-2">
+            <div className="flex items-center gap-2">
+              {/* Text search */}
+              <div className="relative max-w-xs flex-1">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+                <Input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Filter by text or context..."
+                  className="pl-8 h-9"
+                />
+              </div>
+              {/* Tag input */}
+              <div className="relative max-w-xs flex-1">
+                <Tag className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+                <Input
+                  type="text"
+                  value={tagInput}
+                  onChange={(e) => setTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === ",") {
+                      e.preventDefault();
+                      addTagFilter(tagInput);
+                    } else if (e.key === "Backspace" && !tagInput && tagFilters.length > 0) {
+                      removeTagFilter(tagFilters[tagFilters.length - 1]);
+                    }
+                  }}
+                  placeholder="Filter by tag…"
+                  className="pl-8 h-9"
+                />
+              </div>
+            </div>
+            {/* Active tag chips */}
+            {tagFilters.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {tagFilters.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-md bg-primary/10 text-primary border border-primary/20 font-medium leading-none"
+                  >
+                    <span className="opacity-50 select-none font-mono">#</span>
+                    {tag}
+                    <button
+                      onClick={() => removeTagFilter(tag)}
+                      className="opacity-50 hover:opacity-100 transition-opacity ml-0.5"
+                      aria-label={`Remove tag ${tag}`}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between mb-6">
-            <div className="text-sm text-muted-foreground">
-              {searchQuery
-                ? `${filteredTableRows.length} of ${data.total_units} memories`
-                : `${data.total_units} total memories`}
+            <div className="flex items-center gap-4">
+              <div className="text-sm text-muted-foreground">
+                {searchQuery || tagFilters.length > 0 ? (
+                  `${filteredTableRows.length} matching memories`
+                ) : data.table_rows?.length < data.total_units ? (
+                  <span>
+                    Showing {data.table_rows?.length ?? 0} of {data.total_units} total memories
+                    <button
+                      onClick={() => {
+                        const newLimit = Math.min(data.total_units, fetchLimit + 1000);
+                        setFetchLimit(newLimit);
+                        loadData(newLimit);
+                      }}
+                      className="ml-2 text-primary hover:underline"
+                    >
+                      Load more
+                    </button>
+                  </span>
+                ) : (
+                  `${data.total_units} total memories`
+                )}
+              </div>
+
+              {/* Consolidation status for observations */}
+              {factType === "observation" && consolidationStatus && (
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+                    consolidationStatus.pending_consolidation === 0
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                      : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20"
+                  }`}
+                  title={
+                    consolidationStatus.pending_consolidation === 0
+                      ? `All memories consolidated${consolidationStatus.last_consolidated_at ? ` (last: ${new Date(consolidationStatus.last_consolidated_at).toLocaleString()})` : ""}`
+                      : `${consolidationStatus.pending_consolidation} memories pending consolidation`
+                  }
+                >
+                  {consolidationStatus.pending_consolidation === 0 ? (
+                    <>
+                      <CheckCircle className="w-3 h-3" />
+                      In Sync
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-3 h-3" />
+                      {consolidationStatus.pending_consolidation} Pending
+                    </>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex items-center gap-2 bg-muted rounded-lg p-1">
               <button
                 onClick={() => setViewMode("graph")}
-                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-1.5 ${
                   viewMode === "graph"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
-                Graph View
+                <Network className="w-4 h-4" />
+                Graph
               </button>
               <button
                 onClick={() => setViewMode("table")}
-                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-1.5 ${
                   viewMode === "table"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
-                Table View
+                <List className="w-4 h-4" />
+                Table
               </button>
               <button
                 onClick={() => setViewMode("timeline")}
-                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-1.5 ${
                   viewMode === "timeline"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 }`}
               >
-                Timeline View
+                <Calendar className="w-4 h-4" />
+                Timeline
               </button>
             </div>
           </div>
@@ -329,6 +472,7 @@ export function DataView({ factType }: DataViewProps) {
                       memory={selectedGraphNode}
                       onClose={() => setSelectedGraphNode(null)}
                       inPanel
+                      bankId={currentBank || undefined}
                     />
                   ) : (
                     /* Legend & Controls View */
@@ -467,22 +611,41 @@ export function DataView({ factType }: DataViewProps) {
                             <div className="flex items-center justify-between mb-2">
                               <Label className="text-sm text-foreground">Max nodes</Label>
                               <span className="text-xs text-muted-foreground">
-                                {maxNodes ?? "All"} / {graph2DData.nodes.length}
+                                {graph2DData.nodes.length > 50
+                                  ? `${maxNodes ?? 50} / ${graph2DData.nodes.length}`
+                                  : `${maxNodes ?? "All"} / ${graph2DData.nodes.length}`}
                               </span>
                             </div>
                             <Slider
-                              value={[maxNodes ?? graph2DData.nodes.length]}
+                              value={[
+                                graph2DData.nodes.length > 50
+                                  ? maxNodes || 20
+                                  : maxNodes || Math.min(graph2DData.nodes.length, 20),
+                              ]}
                               min={10}
-                              max={Math.max(graph2DData.nodes.length, 10)}
+                              max={Math.min(Math.max(graph2DData.nodes.length, 10), 50)}
                               step={10}
-                              onValueChange={([v]) =>
-                                setMaxNodes(v >= graph2DData.nodes.length ? undefined : v)
-                              }
+                              onValueChange={([v]) => {
+                                const effectiveMax = Math.min(graph2DData.nodes.length, 50);
+                                // If we have >50 nodes, never allow "All" (undefined), cap at 50
+                                if (graph2DData.nodes.length > 50) {
+                                  setMaxNodes(v);
+                                } else {
+                                  // Original behavior for ≤50 nodes: allow "All" when slider reaches max
+                                  setMaxNodes(v >= effectiveMax ? undefined : v);
+                                }
+                              }}
                               className="w-full"
                             />
                           </div>
                           <p className="text-xs text-muted-foreground">
                             All links between visible nodes are shown.
+                            {graph2DData.nodes.length > 50 && (
+                              <span className="block text-amber-600 dark:text-amber-400 mt-1">
+                                ⚠️ Limited to 50 nodes for performance. Total:{" "}
+                                {graph2DData.nodes.length}
+                              </span>
+                            )}
                           </p>
                         </div>
                       </div>
@@ -517,11 +680,26 @@ export function DataView({ factType }: DataViewProps) {
                             <Table className="table-fixed">
                               <TableHeader>
                                 <TableRow className="bg-muted/50">
-                                  <TableHead className="w-[45%]">Memory</TableHead>
-                                  <TableHead className="w-[20%]">Entities</TableHead>
-                                  <TableHead className="w-[15%]">Occurred</TableHead>
-                                  <TableHead className="w-[15%]">Mentioned</TableHead>
-                                  <TableHead className="w-[5%]"></TableHead>
+                                  <TableHead
+                                    className={factType === "observation" ? "w-[35%]" : "w-[38%]"}
+                                  >
+                                    {factType === "observation" ? "Observation" : "Memory"}
+                                  </TableHead>
+                                  <TableHead className="w-[15%]">Entities</TableHead>
+                                  <TableHead className="w-[15%]">Tags</TableHead>
+                                  {factType === "observation" && (
+                                    <TableHead className="w-[10%]">Sources</TableHead>
+                                  )}
+                                  <TableHead
+                                    className={factType === "observation" ? "w-[12%]" : "w-[16%]"}
+                                  >
+                                    Occurred
+                                  </TableHead>
+                                  <TableHead
+                                    className={factType === "observation" ? "w-[13%]" : "w-[16%]"}
+                                  >
+                                    Mentioned
+                                  </TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -530,28 +708,28 @@ export function DataView({ factType }: DataViewProps) {
                                     ? new Date(row.occurred_start).toLocaleDateString("en-US", {
                                         month: "short",
                                         day: "numeric",
+                                        year: "numeric",
                                       })
                                     : null;
                                   const mentionedDisplay = row.mentioned_at
                                     ? new Date(row.mentioned_at).toLocaleDateString("en-US", {
                                         month: "short",
                                         day: "numeric",
+                                        year: "numeric",
                                       })
                                     : null;
 
                                   return (
                                     <TableRow
                                       key={row.id || idx}
-                                      onClick={() => setSelectedTableMemory(row)}
-                                      className={`cursor-pointer hover:bg-muted/50 ${
-                                        selectedTableMemory?.id === row.id ? "bg-primary/10" : ""
-                                      }`}
+                                      onClick={() => setModalMemoryId(row.id)}
+                                      className="cursor-pointer hover:bg-muted/50"
                                     >
                                       <TableCell className="py-2">
                                         <div className="line-clamp-2 text-sm leading-snug text-foreground">
                                           {row.text}
                                         </div>
-                                        {row.context && (
+                                        {row.context && factType !== "observation" && (
                                           <div className="text-xs text-muted-foreground mt-0.5 truncate">
                                             {row.context}
                                           </div>
@@ -581,6 +759,34 @@ export function DataView({ factType }: DataViewProps) {
                                           <span className="text-xs text-muted-foreground">-</span>
                                         )}
                                       </TableCell>
+                                      <TableCell className="py-2">
+                                        {row.tags && row.tags.length > 0 ? (
+                                          <div className="flex gap-1 flex-wrap">
+                                            {(row.tags as string[])
+                                              .slice(0, 2)
+                                              .map((tag: string, i: number) => (
+                                                <span
+                                                  key={i}
+                                                  className="text-[10px] px-1.5 py-0.5 rounded-md bg-amber-500/10 text-amber-700 border border-amber-500/20 font-medium font-mono"
+                                                >
+                                                  #{tag}
+                                                </span>
+                                              ))}
+                                            {row.tags.length > 2 && (
+                                              <span className="text-[10px] text-muted-foreground">
+                                                +{row.tags.length - 2}
+                                              </span>
+                                            )}
+                                          </div>
+                                        ) : (
+                                          <span className="text-xs text-muted-foreground">-</span>
+                                        )}
+                                      </TableCell>
+                                      {factType === "observation" && (
+                                        <TableCell className="text-xs py-2 text-foreground">
+                                          {row.proof_count ?? 1}
+                                        </TableCell>
+                                      )}
                                       <TableCell className="text-xs py-2 text-foreground">
                                         {occurredDisplay || (
                                           <span className="text-muted-foreground">-</span>
@@ -590,24 +796,6 @@ export function DataView({ factType }: DataViewProps) {
                                         {mentionedDisplay || (
                                           <span className="text-muted-foreground">-</span>
                                         )}
-                                      </TableCell>
-                                      <TableCell className="py-2">
-                                        <Button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            copyToClipboard(row.id);
-                                          }}
-                                          size="sm"
-                                          variant="secondary"
-                                          className="h-6 w-6 p-0"
-                                          title="Copy ID"
-                                        >
-                                          {copiedId === row.id ? (
-                                            <Check className="h-3 w-3 text-green-600" />
-                                          ) : (
-                                            <Copy className="h-3 w-3" />
-                                          )}
-                                        </Button>
                                       </TableCell>
                                     </TableRow>
                                   );
@@ -678,21 +866,16 @@ export function DataView({ factType }: DataViewProps) {
                   )}
                 </div>
               </div>
-
-              {/* Memory Detail Panel for Table View - Fixed on Right */}
-              {selectedTableMemory && (
-                <div className="fixed right-0 top-0 h-screen w-[420px] bg-card border-l-2 border-primary shadow-2xl z-50 overflow-y-auto animate-in slide-in-from-right duration-300 ease-out">
-                  <MemoryDetailPanel
-                    memory={selectedTableMemory}
-                    onClose={() => setSelectedTableMemory(null)}
-                    inPanel
-                  />
-                </div>
-              )}
             </div>
           )}
 
-          {viewMode === "timeline" && <TimelineView data={data} filteredRows={filteredTableRows} />}
+          {viewMode === "timeline" && (
+            <TimelineView
+              data={data}
+              filteredRows={filteredTableRows}
+              bankId={currentBank || undefined}
+            />
+          )}
         </>
       ) : (
         <div className="flex items-center justify-center py-20">
@@ -702,6 +885,9 @@ export function DataView({ factType }: DataViewProps) {
           </div>
         </div>
       )}
+
+      {/* Memory Detail Modal */}
+      <MemoryDetailModal memoryId={modalMemoryId} onClose={() => setModalMemoryId(null)} />
     </div>
   );
 }
@@ -709,7 +895,15 @@ export function DataView({ factType }: DataViewProps) {
 // Timeline View Component - Custom compact timeline with zoom and navigation
 type Granularity = "year" | "month" | "week" | "day";
 
-function TimelineView({ data, filteredRows }: { data: any; filteredRows: any[] }) {
+function TimelineView({
+  data,
+  filteredRows,
+  bankId,
+}: {
+  data: any;
+  filteredRows: any[];
+  bankId?: string;
+}) {
   const [selectedItem, setSelectedItem] = useState<any>(null);
   const [granularity, setGranularity] = useState<Granularity>("month");
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -1062,7 +1256,12 @@ function TimelineView({ data, filteredRows }: { data: any; filteredRows: any[] }
       {/* Detail Panel - Fixed on Right */}
       {selectedItem && (
         <div className="fixed right-0 top-0 h-screen w-[420px] bg-card border-l-2 border-primary shadow-2xl z-50 overflow-y-auto animate-in slide-in-from-right duration-300 ease-out">
-          <MemoryDetailPanel memory={selectedItem} onClose={() => setSelectedItem(null)} inPanel />
+          <MemoryDetailPanel
+            memory={selectedItem}
+            onClose={() => setSelectedItem(null)}
+            inPanel
+            bankId={bankId}
+          />
         </div>
       )}
     </div>

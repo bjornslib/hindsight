@@ -6,8 +6,8 @@ from content input to fact storage.
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import TypedDict
+from datetime import datetime
+from typing import Literal, TypedDict
 from uuid import UUID
 
 
@@ -20,18 +20,23 @@ class RetainContentDict(TypedDict, total=False):
         event_date: When the content occurred (optional, defaults to now)
         metadata: Custom key-value metadata (optional)
         document_id: Document ID for this content item (optional)
+        entities: User-provided entities to merge with extracted entities (optional)
+        tags: Visibility scope tags for this content item (optional)
+        observation_scopes: How to scope observations for consolidation (optional).
+            "per_tag" runs one pass per individual tag; "combined" (default) runs a
+            single pass with all tags; a list[list[str]] specifies exact passes.
     """
 
     content: str  # Required
     context: str
-    event_date: datetime
+    event_date: datetime | None
     metadata: dict[str, str]
     document_id: str
-
-
-def _now_utc() -> datetime:
-    """Factory function for default event_date."""
-    return datetime.now(UTC)
+    entities: list[dict[str, str]]  # [{"text": "...", "type": "..."}]
+    tags: list[str]  # Visibility scope tags
+    observation_scopes: (
+        Literal["per_tag", "combined", "all_combinations"] | list[list[str]]
+    )  # Observation scopes for consolidation
 
 
 @dataclass
@@ -44,8 +49,13 @@ class RetainContent:
 
     content: str
     context: str = ""
-    event_date: datetime = field(default_factory=_now_utc)
+    event_date: datetime | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    entities: list[dict[str, str]] = field(default_factory=list)  # User-provided entities
+    tags: list[str] = field(default_factory=list)  # Visibility scope tags
+    observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = (
+        None  # Observation scopes
+    )
 
 
 @dataclass
@@ -80,10 +90,10 @@ class CausalRelation:
     """
     Causal relationship between facts.
 
-    Represents how one fact causes, enables, or prevents another.
+    Represents how one fact was caused by another.
     """
 
-    relation_type: str  # "causes", "enables", "prevents", "caused_by"
+    relation_type: str  # "caused_by"
     target_fact_index: int  # Index of the target fact in the batch
     strength: float = 1.0  # Strength of the causal relationship
 
@@ -110,6 +120,10 @@ class ExtractedFact:
     context: str = ""
     mentioned_at: datetime | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)  # Visibility scope tags
+    observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = (
+        None  # Observation scopes
+    )
 
 
 @dataclass
@@ -128,7 +142,7 @@ class ProcessedFact:
     # Temporal data
     occurred_start: datetime | None
     occurred_end: datetime | None
-    mentioned_at: datetime
+    mentioned_at: datetime | None
 
     # Context and metadata
     context: str
@@ -152,6 +166,15 @@ class ProcessedFact:
     # DB fields (set after insertion)
     unit_id: UUID | None = None
 
+    # Track which content this fact came from (for user entity merging)
+    content_index: int = 0
+
+    # Visibility scope tags
+    tags: list[str] = field(default_factory=list)
+
+    # Observation scopes for consolidation
+    observation_scopes: Literal["per_tag", "combined", "all_combinations"] | list[list[str]] | None = None
+
     @property
     def is_duplicate(self) -> bool:
         """Check if this fact was marked as a duplicate."""
@@ -172,12 +195,10 @@ class ProcessedFact:
         Returns:
             ProcessedFact ready for storage
         """
-        from datetime import datetime
-
         # Use occurred dates only if explicitly provided by LLM
         occurred_start = extracted_fact.occurred_start
         occurred_end = extracted_fact.occurred_end
-        mentioned_at = extracted_fact.mentioned_at or datetime.now(UTC)
+        mentioned_at = extracted_fact.mentioned_at  # May be None when caller opted into no timestamp
 
         # Convert entity strings to EntityRef objects
         entities = [EntityRef(name=name) for name in extracted_fact.entities]
@@ -194,6 +215,9 @@ class ProcessedFact:
             entities=entities,
             causal_relations=extracted_fact.causal_relations,
             chunk_id=chunk_id,
+            content_index=extracted_fact.content_index,
+            tags=extracted_fact.tags,
+            observation_scopes=extracted_fact.observation_scopes,
         )
 
 
@@ -225,6 +249,7 @@ class RetainBatch:
     document_id: str | None = None
     fact_type_override: str | None = None
     confidence_score: float | None = None
+    document_tags: list[str] = field(default_factory=list)  # Tags applied to all items
 
     # Extracted data (populated during processing)
     extracted_facts: list[ExtractedFact] = field(default_factory=list)

@@ -11,6 +11,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+class TemporalConstraint(BaseModel):
+    """Detected temporal constraint from query analysis."""
+
+    start: datetime | None = Field(default=None, description="Start of temporal range")
+    end: datetime | None = Field(default=None, description="End of temporal range")
+
+
 class QueryInfo(BaseModel):
     """Information about the search query."""
 
@@ -19,6 +26,11 @@ class QueryInfo(BaseModel):
     timestamp: datetime = Field(description="When the query was executed")
     budget: int = Field(description="Maximum nodes to explore")
     max_tokens: int = Field(description="Maximum tokens to return in results")
+    tags: list[str] | None = Field(default=None, description="Tags filter applied to recall")
+    tags_match: str | None = Field(default=None, description="Tags matching mode: any, all, any_strict, all_strict")
+    temporal_constraint: TemporalConstraint | None = Field(
+        default=None, description="Detected temporal range from query"
+    )
 
 
 class EntryPoint(BaseModel):
@@ -73,7 +85,6 @@ class NodeVisit(BaseModel):
     text: str = Field(description="Memory unit text content")
     context: str = Field(description="Memory unit context")
     event_date: datetime | None = Field(default=None, description="When the memory occurred")
-    access_count: int = Field(description="Number of times accessed before this search")
 
     # How this node was reached
     is_entry_point: bool = Field(description="Whether this is an entry point")

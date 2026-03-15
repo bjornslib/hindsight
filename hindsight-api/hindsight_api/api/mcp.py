@@ -1,4 +1,4 @@
-"""Hindsight MCP Server implementation using FastMCP."""
+"""Hindsight MCP Server implementation using FastMCP (HTTP transport)."""
 
 import json
 import logging
@@ -8,8 +8,47 @@ from contextvars import ContextVar
 from fastmcp import FastMCP
 
 from hindsight_api import MemoryEngine
-from hindsight_api.engine.response_models import VALID_RECALL_FACT_TYPES
+from hindsight_api.config import _get_raw_config
+from hindsight_api.engine.memory_engine import _current_schema
+from hindsight_api.extensions import MCPExtension, load_extension
+from hindsight_api.extensions.tenant import AuthenticationError
+from hindsight_api.mcp_tools import MCPToolsConfig, register_mcp_tools
 from hindsight_api.models import RequestContext
+
+# All tools available in the system (explicit list — no wildcards)
+_ALL_TOOLS: frozenset[str] = frozenset(
+    {
+        "retain",
+        "recall",
+        "reflect",
+        "list_banks",
+        "create_bank",
+        "list_mental_models",
+        "get_mental_model",
+        "create_mental_model",
+        "update_mental_model",
+        "delete_mental_model",
+        "refresh_mental_model",
+        "list_directives",
+        "create_directive",
+        "delete_directive",
+        "list_memories",
+        "get_memory",
+        "delete_memory",
+        "list_documents",
+        "get_document",
+        "delete_document",
+        "list_operations",
+        "get_operation",
+        "cancel_operation",
+        "list_tags",
+        "get_bank",
+        "get_bank_stats",
+        "update_bank",
+        "delete_bank",
+        "clear_memories",
+    }
+)
 
 # Configure logging from HINDSIGHT_API_LOG_LEVEL environment variable
 _log_level_str = os.environ.get("HINDSIGHT_API_LOG_LEVEL", "info").lower()
@@ -30,8 +69,19 @@ logger = logging.getLogger(__name__)
 # Default bank_id from environment variable
 DEFAULT_BANK_ID = os.environ.get("HINDSIGHT_MCP_BANK_ID", "default")
 
+# Legacy MCP authentication token (for backwards compatibility)
+# If set, this token is checked first before TenantExtension auth
+MCP_AUTH_TOKEN = os.environ.get("HINDSIGHT_API_MCP_AUTH_TOKEN")
+
 # Context variable to hold the current bank_id
 _current_bank_id: ContextVar[str | None] = ContextVar("current_bank_id", default=None)
+
+# Context variable to hold the current API key (for tenant auth propagation)
+_current_api_key: ContextVar[str | None] = ContextVar("current_api_key", default=None)
+
+# Context variables for tenant_id and api_key_id (set by authenticate, used by usage metering)
+_current_tenant_id: ContextVar[str | None] = ContextVar("current_tenant_id", default=None)
+_current_api_key_id: ContextVar[str | None] = ContextVar("current_api_key_id", default=None)
 
 
 def get_current_bank_id() -> str | None:
@@ -39,256 +89,193 @@ def get_current_bank_id() -> str | None:
     return _current_bank_id.get()
 
 
-def create_mcp_server(memory: MemoryEngine) -> FastMCP:
+def get_current_api_key() -> str | None:
+    """Get the current API key from context."""
+    return _current_api_key.get()
+
+
+def get_current_tenant_id() -> str | None:
+    """Get the current tenant_id from context."""
+    return _current_tenant_id.get()
+
+
+def get_current_api_key_id() -> str | None:
+    """Get the current api_key_id from context."""
+    return _current_api_key_id.get()
+
+
+def create_mcp_server(memory: MemoryEngine, multi_bank: bool = True) -> FastMCP:
     """
     Create and configure the Hindsight MCP server.
 
     Args:
         memory: MemoryEngine instance (required)
+        multi_bank: If True, expose all tools with bank_id parameters (default).
+                   If False, only expose bank-scoped tools without bank_id parameters.
 
     Returns:
-        Configured FastMCP server instance with stateless_http enabled
+        Configured FastMCP server instance
     """
-    # Use stateless_http=True for Claude Code compatibility
-    mcp = FastMCP("hindsight-mcp-server", stateless_http=True)
+    mcp = FastMCP("hindsight-mcp-server")
 
-    @mcp.tool()
-    async def retain(content: str, context: str = "general", bank_id: str | None = None) -> str:
-        """
-        Store important information to long-term memory.
+    global_config = _get_raw_config()
 
-        Use this tool PROACTIVELY whenever the user shares:
-        - Personal facts, preferences, or interests
-        - Important events or milestones
-        - User history, experiences, or background
-        - Decisions, opinions, or stated preferences
-        - Goals, plans, or future intentions
-        - Relationships or people mentioned
-        - Work context, projects, or responsibilities
+    # Tools available for this mode (multi-bank exposes all tools; single-bank excludes bank-management tools)
+    _SINGLE_BANK_TOOLS: frozenset[str] = frozenset(
+        {
+            "retain",
+            "recall",
+            "reflect",
+            "list_mental_models",
+            "get_mental_model",
+            "create_mental_model",
+            "update_mental_model",
+            "delete_mental_model",
+            "refresh_mental_model",
+            "list_directives",
+            "create_directive",
+            "delete_directive",
+            "list_memories",
+            "get_memory",
+            "delete_memory",
+            "list_documents",
+            "get_document",
+            "delete_document",
+            "list_operations",
+            "get_operation",
+            "cancel_operation",
+            "list_tags",
+            "get_bank",
+            "update_bank",
+            "delete_bank",
+            "clear_memories",
+        }
+    )
+    base_tools: frozenset[str] | None = None if multi_bank else _SINGLE_BANK_TOOLS
 
-        Args:
-            content: The fact/memory to store (be specific and include relevant details)
-            context: Category for the memory (e.g., 'preferences', 'work', 'hobbies', 'family'). Default: 'general'
-            bank_id: Optional bank to store in (defaults to session bank). Use for cross-bank operations.
-        """
-        try:
-            target_bank = bank_id or get_current_bank_id()
-            if target_bank is None:
-                return "Error: No bank_id configured"
-            await memory.retain_batch_async(
-                bank_id=target_bank, contents=[{"content": content, "context": context}], request_context=RequestContext()
-            )
-            return f"Memory stored successfully in bank '{target_bank}'"
-        except Exception as e:
-            logger.error(f"Error storing memory: {e}", exc_info=True)
-            return f"Error: {str(e)}"
+    # Apply global mcp_enabled_tools filter (env-level allowlist)
+    if global_config.mcp_enabled_tools is not None:
+        allowed = frozenset(global_config.mcp_enabled_tools)
+        base_tools = (base_tools if base_tools is not None else _ALL_TOOLS) & allowed
 
-    @mcp.tool()
-    async def recall(query: str, max_results: int = 10, bank_id: str | None = None) -> str:
-        """
-        Search memories to provide personalized, context-aware responses.
+    # Configure and register tools using shared module
+    config = MCPToolsConfig(
+        bank_id_resolver=get_current_bank_id,
+        api_key_resolver=get_current_api_key,  # Propagate API key for tenant auth
+        tenant_id_resolver=get_current_tenant_id,  # Propagate tenant_id for usage metering
+        api_key_id_resolver=get_current_api_key_id,  # Propagate api_key_id for usage metering
+        include_bank_id_param=multi_bank,
+        tools=base_tools,
+    )
 
-        Use this tool PROACTIVELY to:
-        - Check user's preferences before making suggestions
-        - Recall user's history to provide continuity
-        - Remember user's goals and context
-        - Personalize responses based on past interactions
+    register_mcp_tools(mcp, memory, config)
 
-        Args:
-            query: Natural language search query (e.g., "user's food preferences", "what projects is user working on")
-            max_results: Maximum number of results to return (default: 10)
-            bank_id: Optional bank to search in (defaults to session bank). Use for cross-bank operations.
-        """
-        try:
-            target_bank = bank_id or get_current_bank_id()
-            if target_bank is None:
-                return "Error: No bank_id configured"
-            from hindsight_api.engine.memory_engine import Budget
+    # Load and register additional tools from MCP extension if configured
+    mcp_extension = load_extension("MCP", MCPExtension)
+    if mcp_extension:
+        logger.info(f"Loading MCP extension: {mcp_extension.__class__.__name__}")
+        mcp_extension.register_tools(mcp, memory)
 
-            search_result = await memory.recall_async(
-                bank_id=target_bank,
-                query=query,
-                fact_type=list(VALID_RECALL_FACT_TYPES),
-                budget=Budget.LOW,
-                request_context=RequestContext(),
-            )
-
-            results = [
-                {
-                    "id": fact.id,
-                    "text": fact.text,
-                    "type": fact.fact_type,
-                    "context": fact.context,
-                    "occurred_start": fact.occurred_start,
-                }
-                for fact in search_result.results[:max_results]
-            ]
-
-            return json.dumps({"results": results, "bank_id": target_bank}, indent=2)
-        except Exception as e:
-            logger.error(f"Error searching: {e}", exc_info=True)
-            return json.dumps({"error": str(e), "results": []})
-
-    @mcp.tool()
-    async def reflect(query: str, context: str | None = None, budget: str = "low", bank_id: str | None = None) -> str:
-        """
-        Generate thoughtful analysis by synthesizing stored memories with the bank's personality.
-
-        WHEN TO USE THIS TOOL:
-        Use reflect when you need reasoned analysis, not just fact retrieval. This tool
-        thinks through the question using everything the bank knows and its personality traits.
-
-        EXAMPLES OF GOOD QUERIES:
-        - "What patterns have emerged in how I approach debugging?"
-        - "Based on my past decisions, what architectural style do I prefer?"
-        - "What might be the best approach for this problem given what you know about me?"
-        - "How should I prioritize these tasks based on my goals?"
-
-        HOW IT DIFFERS FROM RECALL:
-        - recall: Returns raw facts matching your search (fast lookup)
-        - reflect: Reasons across memories to form a synthesized answer (deeper analysis)
-
-        Use recall for "what did I say about X?" and reflect for "what should I do about X?"
-
-        Args:
-            query: The question or topic to reflect on
-            context: Optional context about why this reflection is needed
-            budget: Search budget - 'low', 'mid', or 'high' (default: 'low')
-            bank_id: Optional bank to reflect in (defaults to session bank). Use for cross-bank operations.
-        """
-        try:
-            target_bank = bank_id or get_current_bank_id()
-            if target_bank is None:
-                return "Error: No bank_id configured"
-            from hindsight_api.engine.memory_engine import Budget
-
-            # Map string budget to enum
-            budget_map = {"low": Budget.LOW, "mid": Budget.MID, "high": Budget.HIGH}
-            budget_enum = budget_map.get(budget.lower(), Budget.LOW)
-
-            reflect_result = await memory.reflect_async(
-                bank_id=target_bank,
-                query=query,
-                budget=budget_enum,
-                context=context,
-                request_context=RequestContext(),
-            )
-
-            # Return the reflection text and optionally facts used
-            result = {
-                "text": reflect_result.text,
-                "bank_id": target_bank,
-                "based_on": {
-                    fact_type: [
-                        {"id": f.id, "text": f.text, "context": f.context}
-                        for f in facts
-                    ]
-                    for fact_type, facts in (reflect_result.based_on or {}).items()
-                    if facts
-                },
-            }
-
-            # Include new opinions if any were formed
-            if reflect_result.new_opinions:
-                result["new_opinions"] = [
-                    {"text": op.text, "confidence": op.confidence}
-                    for op in reflect_result.new_opinions
-                ]
-
-            return json.dumps(result, indent=2)
-        except Exception as e:
-            logger.error(f"Error reflecting: {e}", exc_info=True)
-            return json.dumps({"error": str(e), "text": ""})
-
-    @mcp.tool()
-    async def list_banks() -> str:
-        """
-        List all available memory banks.
-
-        Use this to discover banks for orchestration or to find
-        the correct bank_id for cross-bank operations.
-
-        Returns:
-            JSON list of banks with id, name, and creation date
-        """
-        try:
-            banks = await memory.list_banks(request_context=RequestContext())
-            return json.dumps({
-                "banks": [
-                    {
-                        "id": b["bank_id"],
-                        "name": b.get("name"),
-                        "created_at": str(b.get("created_at")) if b.get("created_at") else None
-                    }
-                    for b in banks
-                ]
-            }, indent=2)
-        except Exception as e:
-            logger.error(f"Error listing banks: {e}", exc_info=True)
-            return json.dumps({"error": str(e), "banks": []})
-
-    @mcp.tool()
-    async def create_bank(bank_id: str, name: str | None = None, background: str | None = None) -> str:
-        """
-        Create or update a memory bank.
-
-        Use this to create new banks for different agents, sessions, or purposes.
-        Banks are isolated memory stores - each bank has its own memories and personality.
-
-        Args:
-            bank_id: Unique identifier for the bank (e.g., 'orchestrator-memory', 'agent-1')
-            name: Human-readable name for the bank
-            background: Context about what this bank stores or its purpose
-        """
-        try:
-            # Get or create the bank profile (auto-creates with defaults)
-            await memory.get_bank_profile(bank_id, request_context=RequestContext())
-
-            # Update name and/or background if provided
-            if name is not None or background is not None:
-                await memory.update_bank_info(
-                    bank_id,
-                    name=name,
-                    background=background,
-                    request_context=RequestContext()
-                )
-
-            # Get final profile
-            profile = await memory.get_bank_profile(bank_id, request_context=RequestContext())
-            return json.dumps({
-                "success": True,
-                "bank_id": bank_id,
-                "name": profile.get("name"),
-                "background": profile.get("background"),
-                "disposition": profile.get("disposition").model_dump() if hasattr(profile.get("disposition"), "model_dump") else dict(profile.get("disposition", {}))
-            }, indent=2)
-        except Exception as e:
-            logger.error(f"Error creating bank: {e}", exc_info=True)
-            return json.dumps({"error": str(e), "success": False})
+    # Make all tools tolerant of extra arguments from LLMs (e.g., "explanation")
+    _make_tools_tolerant(mcp)
 
     return mcp
 
 
+def _make_tools_tolerant(mcp: FastMCP) -> None:
+    """Wrap all tool run methods to strip unknown arguments before validation.
+
+    LLMs frequently add extra fields like "explanation" or "reasoning" to tool calls.
+    FastMCP's Pydantic TypeAdapter rejects these with "Unexpected keyword argument".
+    This wraps each tool's run() to filter arguments to only known parameters.
+    """
+    try:
+        for name, tool in mcp._tool_manager._tools.items():
+            if hasattr(tool, "parameters") and tool.parameters:
+                allowed = set(tool.parameters.get("properties", {}).keys())
+                original_run = tool.run
+
+                async def _tolerant_run(arguments, _allowed=allowed, _orig=original_run):
+                    extra_keys = set(arguments.keys()) - _allowed
+                    if extra_keys:
+                        logger.debug(f"Stripping unknown arguments from tool call: {extra_keys}")
+                        arguments = {k: v for k, v in arguments.items() if k in _allowed}
+                    return await _orig(arguments)
+
+                # FunctionTool is a Pydantic model with extra='forbid', so use
+                # object.__setattr__ to bypass Pydantic's setter validation.
+                object.__setattr__(tool, "run", _tolerant_run)
+    except (AttributeError, KeyError) as e:
+        logger.warning(f"Could not make tools tolerant of extra arguments: {e}")
+
+
 class MCPMiddleware:
-    """ASGI middleware that extracts bank_id from header or path and sets context.
+    """ASGI middleware that intercepts MCP requests and routes to appropriate MCP server.
 
-    Bank ID can be provided via:
-    1. X-Bank-Id header (recommended for Claude Code)
-    2. URL path: /mcp/{bank_id}/
-    3. Environment variable HINDSIGHT_MCP_BANK_ID (fallback default)
+    This middleware wraps the main FastAPI app and intercepts requests matching the
+    configured prefix (default: /mcp). Non-MCP requests pass through to the inner app.
 
-    For Claude Code, configure with:
+    Authentication:
+        1. If HINDSIGHT_API_MCP_AUTH_TOKEN is set (legacy), validates against that token
+        2. Otherwise, uses TenantExtension.authenticate_mcp() from the MemoryEngine
+           - DefaultTenantExtension: no auth required (local dev)
+           - ApiKeyTenantExtension: validates against env var
+
+    Two modes based on URL structure:
+
+    1. Multi-bank mode (for /mcp/ root endpoint):
+       - Exposes all tools: retain, recall, reflect, list_banks, create_bank
+       - All tools include optional bank_id parameter for cross-bank operations
+       - Bank ID from: X-Bank-Id header or HINDSIGHT_MCP_BANK_ID env var
+
+    2. Single-bank mode (for /mcp/{bank_id}/ endpoints):
+       - Exposes bank-scoped tools only: retain, recall, reflect
+       - No bank_id parameter (comes from URL)
+       - No bank management tools (list_banks, create_bank)
+       - Recommended for agent isolation
+
+    Bank ID resolution priority:
+        1. URL path (e.g., /mcp/{bank_id}/) → single-bank mode
+        2. X-Bank-Id header → multi-bank mode
+        3. HINDSIGHT_MCP_BANK_ID env var → multi-bank mode (default: "default")
+
+    Examples:
+        # Single-bank mode (recommended for agent isolation)
+        claude mcp add --transport http my-agent http://localhost:8888/mcp/my-agent-bank/ \\
+            --header "Authorization: Bearer <token>"
+
+        # Multi-bank mode (for cross-bank operations)
         claude mcp add --transport http hindsight http://localhost:8888/mcp \\
-            --header "X-Bank-Id: my-bank"
+            --header "X-Bank-Id: my-bank" --header "Authorization: Bearer <token>"
     """
 
-    def __init__(self, app, memory: MemoryEngine):
+    def __init__(
+        self,
+        app,
+        memory: MemoryEngine,
+        prefix: str = "/mcp",
+        multi_bank_app=None,
+        single_bank_app=None,
+        multi_bank_server=None,
+        single_bank_server=None,
+    ):
         self.app = app
+        self.prefix = prefix
         self.memory = memory
-        self.mcp_server = create_mcp_server(memory)
-        self.mcp_app = self.mcp_server.http_app()
-        # Expose the lifespan for the parent app to chain
-        self.lifespan = self.mcp_app.lifespan_handler if hasattr(self.mcp_app, 'lifespan_handler') else None
+        self.tenant_extension = memory._tenant_extension
+
+        if multi_bank_app and single_bank_app:
+            # Pre-created servers (used when called via add_middleware from create_app)
+            self.multi_bank_app = multi_bank_app
+            self.single_bank_app = single_bank_app
+            self.multi_bank_server = multi_bank_server
+            self.single_bank_server = single_bank_server
+        else:
+            # Create servers internally (for direct construction / tests)
+            self.multi_bank_server = create_mcp_server(memory, multi_bank=True)
+            self.multi_bank_app = self.multi_bank_server.http_app(path="/", stateless_http=True)
+            self.single_bank_server = create_mcp_server(memory, multi_bank=False)
+            self.single_bank_app = self.single_bank_server.http_app(path="/", stateless_http=True)
 
     def _get_header(self, scope: dict, name: str) -> str | None:
         """Extract a header value from ASGI scope."""
@@ -300,50 +287,113 @@ class MCPMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
-            await self.mcp_app(scope, receive, send)
+            await self.app(scope, receive, send)
             return
 
         path = scope.get("path", "")
 
-        # Strip any mount prefix (e.g., /mcp) that FastAPI might not have stripped
-        root_path = scope.get("root_path", "")
-        if root_path and path.startswith(root_path):
-            path = path[len(root_path):] or "/"
+        # Check if this is an MCP request (matches prefix)
+        if not (path == self.prefix or path.startswith(self.prefix + "/")):
+            # Not an MCP request — pass through to the inner app
+            await self.app(scope, receive, send)
+            return
 
-        # Also handle case where mount path wasn't stripped (e.g., /mcp/...)
-        if path.startswith("/mcp/"):
-            path = path[4:]  # Remove /mcp prefix
-        elif path == "/mcp":
-            path = "/"
+        # Strip prefix from path
+        path = path[len(self.prefix) :] or "/"
 
-        # Try to get bank_id from header first (for Claude Code compatibility)
-        bank_id = self._get_header(scope, "X-Bank-Id")
+        # Extract auth token from header (for tenant auth propagation)
+        auth_header = self._get_header(scope, "Authorization")
+        auth_token: str | None = None
+        if auth_header:
+            # Support both "Bearer <token>" and direct token
+            auth_token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else auth_header.strip()
 
-        # If no header, try to extract from path: /{bank_id}/...
+        # Authenticate: check legacy MCP_AUTH_TOKEN first, then TenantExtension
+        tenant_context = None
+        auth_tenant_id: str | None = None
+        auth_api_key_id: str | None = None
+        if MCP_AUTH_TOKEN:
+            # Legacy authentication mode - validate against static token
+            if not auth_token:
+                await self._send_error(send, 401, "Authorization header required")
+                return
+            if auth_token != MCP_AUTH_TOKEN:
+                await self._send_error(send, 401, "Invalid authentication token")
+                return
+            # Legacy mode doesn't use tenant schemas
+            tenant_context = None
+        else:
+            # Use TenantExtension.authenticate_mcp() for auth
+            try:
+                auth_context = RequestContext(api_key=auth_token)
+                tenant_context = await self.tenant_extension.authenticate_mcp(auth_context)
+                # Capture tenant_id and api_key_id set by authenticate() for usage metering
+                auth_tenant_id = auth_context.tenant_id
+                auth_api_key_id = auth_context.api_key_id
+            except AuthenticationError as e:
+                await self._send_error(send, 401, str(e), extra_headers=e.headers)
+                return
+
+        # Set schema from tenant context so downstream DB queries use the correct schema
+        schema_token = (
+            _current_schema.set(tenant_context.schema_name) if tenant_context and tenant_context.schema_name else None
+        )
+
+        # Resolve bank_id: path takes priority over header.
+        # Path = user's explicit connection endpoint (e.g., /mcp/my-bank/).
+        # X-Bank-Id header = per-request override for multi-bank mode only.
+        bank_id = None
+        bank_id_from_path = False
         new_path = path
-        if not bank_id and path.startswith("/") and len(path) > 1:
+
+        # First, try to extract from path: /{bank_id}/...
+        if path.startswith("/") and len(path) > 1:
             parts = path[1:].split("/", 1)
-            if parts[0] and parts[0] != "mcp":
-                # First segment looks like a bank_id
+            if parts[0]:
                 bank_id = parts[0]
+                bank_id_from_path = True
                 new_path = "/" + parts[1] if len(parts) > 1 else "/"
+
+        # If no path-based bank_id, try X-Bank-Id header (multi-bank mode)
+        if not bank_id:
+            bank_id = self._get_header(scope, "X-Bank-Id")
 
         # Fall back to default bank_id
         if not bank_id:
             bank_id = DEFAULT_BANK_ID
             logger.debug(f"Using default bank_id: {bank_id}")
 
-        # Set bank_id context
-        token = _current_bank_id.set(bank_id)
+        # Select the appropriate MCP app based on how bank_id was provided:
+        # - Path-based bank_id → single-bank app (no bank_id param, scoped tools)
+        # - Header/env bank_id → multi-bank app (bank_id param, all tools)
+        target_app = self.single_bank_app if bank_id_from_path else self.multi_bank_app
+
+        # Set bank_id, api_key, tenant_id, and api_key_id context
+        bank_id_token = _current_bank_id.set(bank_id)
+        # Store the auth token for tenant extension to validate
+        api_key_token = _current_api_key.set(auth_token) if auth_token else None
+        # Store tenant_id and api_key_id from authentication for usage metering
+        tenant_id_token = _current_tenant_id.set(auth_tenant_id) if auth_tenant_id else None
+        api_key_id_token = _current_api_key_id.set(auth_api_key_id) if auth_api_key_id else None
         try:
             new_scope = scope.copy()
             new_scope["path"] = new_path
             # Clear root_path since we're passing directly to the app
             new_scope["root_path"] = ""
 
-            # Wrap send to rewrite the SSE endpoint URL to include bank_id if using path-based routing
+            # Wrap send to rewrite the SSE endpoint URL to include bank_id if using path-based routing.
+            # Only rewrite SSE (text/event-stream) responses to avoid corrupting tool results
+            # that might contain the literal string "data: /messages".
+            is_sse_response = False
+
             async def send_wrapper(message):
-                if message["type"] == "http.response.body":
+                nonlocal is_sse_response
+                if message["type"] == "http.response.start":
+                    for header_name, header_value in message.get("headers", []):
+                        if header_name == b"content-type" and b"text/event-stream" in header_value:
+                            is_sse_response = True
+                            break
+                if message["type"] == "http.response.body" and bank_id_from_path and is_sse_response:
                     body = message.get("body", b"")
                     if body and b"/messages" in body:
                         # Rewrite /messages to /{bank_id}/messages in SSE endpoint event
@@ -351,18 +401,29 @@ class MCPMiddleware:
                         message = {**message, "body": body}
                 await send(message)
 
-            await self.mcp_app(new_scope, receive, send_wrapper)
+            await target_app(new_scope, receive, send_wrapper)
         finally:
-            _current_bank_id.reset(token)
+            _current_bank_id.reset(bank_id_token)
+            if api_key_token is not None:
+                _current_api_key.reset(api_key_token)
+            if tenant_id_token is not None:
+                _current_tenant_id.reset(tenant_id_token)
+            if api_key_id_token is not None:
+                _current_api_key_id.reset(api_key_id_token)
+            if schema_token is not None:
+                _current_schema.reset(schema_token)
 
-    async def _send_error(self, send, status: int, message: str):
+    async def _send_error(self, send, status: int, message: str, extra_headers: dict[str, str] | None = None):
         """Send an error response."""
         body = json.dumps({"error": message}).encode()
+        headers = [(b"content-type", b"application/json")]
+        for key, value in (extra_headers or {}).items():
+            headers.append((key.encode(), value.encode()))
         await send(
             {
                 "type": "http.response.start",
                 "status": status,
-                "headers": [(b"content-type", b"application/json")],
+                "headers": headers,
             }
         )
         await send(
@@ -373,19 +434,19 @@ class MCPMiddleware:
         )
 
 
-def create_mcp_app(memory: MemoryEngine):
-    """
-    Create an ASGI app that handles MCP requests.
+def create_mcp_servers(memory: MemoryEngine):
+    """Create multi-bank and single-bank MCP servers and their Starlette apps.
 
-    Bank ID can be provided via:
-    1. X-Bank-Id header: claude mcp add --transport http hindsight http://localhost:8888/mcp --header "X-Bank-Id: my-bank"
-    2. URL path: /mcp/{bank_id}/
-    3. Environment variable HINDSIGHT_MCP_BANK_ID (fallback, default: "default")
-
-    Args:
-        memory: MemoryEngine instance
+    Returns the servers and apps separately so lifespans can be chained before
+    the middleware wraps the main app.
 
     Returns:
-        ASGI application
+        Tuple of (multi_bank_server, single_bank_server, multi_bank_app, single_bank_app)
     """
-    return MCPMiddleware(None, memory)
+    multi_bank_server = create_mcp_server(memory, multi_bank=True)
+    multi_bank_app = multi_bank_server.http_app(path="/", stateless_http=True)
+
+    single_bank_server = create_mcp_server(memory, multi_bank=False)
+    single_bank_app = single_bank_server.http_app(path="/", stateless_http=True)
+
+    return multi_bank_server, single_bank_server, multi_bank_app, single_bank_app

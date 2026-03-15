@@ -6,14 +6,33 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 import httpx
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types as genai_types
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, LengthFinishReasonError
+
+# Vertex AI imports (conditional - for LLMProvider to pass credentials to GeminiLLM)
+try:
+    import google.auth
+    from google.oauth2 import service_account
+
+    VERTEXAI_AVAILABLE = True
+except ImportError:
+    VERTEXAI_AVAILABLE = False
+
+from ..config import (
+    DEFAULT_LLM_MAX_CONCURRENT,
+    DEFAULT_LLM_TIMEOUT,
+    ENV_LLM_GROQ_SERVICE_TIER,
+    ENV_LLM_MAX_CONCURRENT,
+    ENV_LLM_TIMEOUT,
+)
+from ..metrics import get_metrics_collector
+from .response_models import TokenUsage
 
 # Seed applied to every Groq request for deterministic behavior.
 DEFAULT_LLM_SEED = 4242
@@ -24,7 +43,9 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Global semaphore to limit concurrent LLM requests across all instances
-_global_llm_semaphore = asyncio.Semaphore(32)
+# Set HINDSIGHT_API_LLM_MAX_CONCURRENT=1 for local LLMs (LM Studio, Ollama)
+_llm_max_concurrent = int(os.getenv(ENV_LLM_MAX_CONCURRENT, str(DEFAULT_LLM_MAX_CONCURRENT)))
+_global_llm_semaphore = asyncio.Semaphore(_llm_max_concurrent)
 
 
 class OutputTooLongError(Exception):
@@ -37,6 +58,166 @@ class OutputTooLongError(Exception):
     """
 
     pass
+
+
+def parse_llm_json(raw: str) -> Any:
+    """
+    Robustly parse JSON returned by an LLM.
+
+    Handles common LLM output quirks:
+    1. Markdown code fences (```json ... ```) — strip them before parsing.
+    2. Embedded control characters (\\x00-\\x1f, \\x7f) — replace with space
+       and retry if the initial parse fails.
+
+    Args:
+        raw: Raw text returned by the LLM.
+
+    Returns:
+        Parsed Python object (dict, list, etc.).
+
+    Raises:
+        json.JSONDecodeError: If the text cannot be parsed even after cleanup.
+    """
+    text = raw.strip()
+
+    # Strip markdown code fences (some models wrap JSON in ```json ... ```)
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Some models (e.g. Gemini) embed raw control characters inside JSON
+        # string values. Replacing them with a space usually produces valid JSON.
+        cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+        return json.loads(cleaned)
+
+
+_PROVIDERS_WITHOUT_API_KEY = frozenset(
+    {
+        "ollama",
+        "lmstudio",
+        "openai-codex",
+        "claude-code",
+        "mock",
+        "vertexai",
+    }
+)
+
+
+def requires_api_key(provider: str) -> bool:
+    """Return True if the given provider requires an API key to operate."""
+    return provider.lower() not in _PROVIDERS_WITHOUT_API_KEY
+
+
+def create_llm_provider(
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    reasoning_effort: str,
+    groq_service_tier: str | None = None,
+    openai_service_tier: str | None = None,
+    vertexai_project_id: str | None = None,
+    vertexai_region: str | None = None,
+    vertexai_credentials: Any = None,
+    gemini_safety_settings: list | None = None,
+) -> Any:  # Returns LLMInterface
+    """
+    Factory function to create the appropriate LLM provider implementation.
+
+    Args:
+        provider: Provider name ("openai", "groq", "ollama", "gemini", "anthropic", etc.).
+        api_key: API key (may be None for local providers or OAuth providers).
+        base_url: Base URL for the API.
+        model: Model name.
+        reasoning_effort: Reasoning effort level for supported providers.
+        groq_service_tier: Groq service tier (for Groq provider) - "on_demand", "flex", or "auto".
+        openai_service_tier: OpenAI service tier (for OpenAI provider) - None (default) or "flex" (50% cheaper).
+        vertexai_project_id: Vertex AI project ID (for VertexAI provider).
+        vertexai_region: Vertex AI region (for VertexAI provider).
+        vertexai_credentials: Vertex AI credentials object (for VertexAI provider).
+
+    Returns:
+        LLMInterface implementation for the specified provider.
+    """
+    from .llm_interface import LLMInterface
+    from .providers import (
+        AnthropicLLM,
+        ClaudeCodeLLM,
+        CodexLLM,
+        GeminiLLM,
+        MockLLM,
+        OpenAICompatibleLLM,
+    )
+
+    provider_lower = provider.lower()
+
+    if provider_lower == "openai-codex":
+        return CodexLLM(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    elif provider_lower == "claude-code":
+        return ClaudeCodeLLM(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    elif provider_lower == "mock":
+        return MockLLM(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    elif provider_lower in ("gemini", "vertexai"):
+        return GeminiLLM(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            vertexai_project_id=vertexai_project_id,
+            vertexai_region=vertexai_region,
+            vertexai_credentials=vertexai_credentials,
+            gemini_safety_settings=gemini_safety_settings,
+        )
+
+    elif provider_lower == "anthropic":
+        return AnthropicLLM(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    elif provider_lower in ("openai", "groq", "ollama", "lmstudio"):
+        return OpenAICompatibleLLM(
+            provider=provider,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            groq_service_tier=groq_service_tier,
+            openai_service_tier=openai_service_tier,
+        )
+
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
 
 
 class LLMProvider:
@@ -53,25 +234,47 @@ class LLMProvider:
         base_url: str,
         model: str,
         reasoning_effort: str = "low",
+        groq_service_tier: str | None = None,
+        openai_service_tier: str | None = None,
+        gemini_safety_settings: list | None = None,
     ):
         """
         Initialize LLM provider.
 
         Args:
-            provider: Provider name ("openai", "groq", "ollama", "gemini").
+            provider: Provider name ("openai", "groq", "ollama", "gemini", "anthropic", "lmstudio").
             api_key: API key.
             base_url: Base URL for the API.
             model: Model name.
             reasoning_effort: Reasoning effort level for supported providers.
+            groq_service_tier: Groq service tier ("on_demand", "flex", "auto") - from config.
+            openai_service_tier: OpenAI service tier (None or "flex") - from config.
+            gemini_safety_settings: Safety settings for Gemini/VertexAI providers.
         """
         self.provider = provider.lower()
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
         self.reasoning_effort = reasoning_effort
+        # Service tiers from hierarchical config (not env vars)
+        self.groq_service_tier = groq_service_tier
+        self.openai_service_tier = openai_service_tier
+        # Gemini safety settings (instance default; can be overridden per-request via context var)
+        self.gemini_safety_settings = gemini_safety_settings
 
         # Validate provider
-        valid_providers = ["openai", "groq", "ollama", "gemini"]
+        valid_providers = [
+            "openai",
+            "groq",
+            "ollama",
+            "gemini",
+            "anthropic",
+            "lmstudio",
+            "vertexai",
+            "openai-codex",
+            "claude-code",
+            "mock",
+        ]
         if self.provider not in valid_providers:
             raise ValueError(f"Invalid LLM provider: {self.provider}. Must be one of: {', '.join(valid_providers)}")
 
@@ -81,25 +284,115 @@ class LLMProvider:
                 self.base_url = "https://api.groq.com/openai/v1"
             elif self.provider == "ollama":
                 self.base_url = "http://localhost:11434/v1"
+            elif self.provider == "lmstudio":
+                self.base_url = "http://localhost:1234/v1"
 
-        # Validate API key (not needed for ollama)
-        if self.provider != "ollama" and not self.api_key:
-            raise ValueError(f"API key not found for {self.provider}")
+        # Prepare Vertex AI config (if applicable)
+        vertexai_project_id = None
+        vertexai_region = None
+        vertexai_credentials = None
 
-        # Create client based on provider
-        if self.provider == "gemini":
-            self._gemini_client = genai.Client(api_key=self.api_key)
-            self._client = None
-        elif self.provider == "ollama":
-            self._client = AsyncOpenAI(api_key="ollama", base_url=self.base_url, max_retries=0)
-            self._gemini_client = None
-        else:
-            # Only pass base_url if it's set (OpenAI uses default URL otherwise)
-            client_kwargs = {"api_key": self.api_key, "max_retries": 0}
-            if self.base_url:
-                client_kwargs["base_url"] = self.base_url
-            self._client = AsyncOpenAI(**client_kwargs)  # type: ignore[invalid-argument-type] - dict kwargs
-            self._gemini_client = None
+        if self.provider == "vertexai":
+            from ..config import get_config
+
+            config = get_config()
+
+            vertexai_project_id = config.llm_vertexai_project_id
+            if not vertexai_project_id:
+                raise ValueError(
+                    "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID is required for Vertex AI provider. "
+                    "Set it to your GCP project ID."
+                )
+
+            vertexai_region = config.llm_vertexai_region or "us-central1"
+            service_account_key = config.llm_vertexai_service_account_key
+
+            # Load explicit service account credentials if provided
+            if service_account_key:
+                if not VERTEXAI_AVAILABLE:
+                    raise ValueError(
+                        "Vertex AI service account auth requires 'google-auth' package. "
+                        "Install with: pip install google-auth"
+                    )
+                vertexai_credentials = service_account.Credentials.from_service_account_file(
+                    service_account_key,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                logger.info(f"Vertex AI: Using service account key: {service_account_key}")
+
+            # Strip google/ prefix from model name — native SDK uses bare names
+            if self.model.startswith("google/"):
+                self.model = self.model[len("google/") :]
+
+            logger.info(
+                f"Vertex AI: project={vertexai_project_id}, region={vertexai_region}, "
+                f"model={self.model}, auth={'service_account' if service_account_key else 'ADC'}"
+            )
+
+        # For Gemini/VertexAI providers: read safety settings from global config if not explicitly provided
+        # Use _get_raw_config() to bypass StaticConfigProxy (which blocks configurable fields),
+        # since LLMProvider initialization legitimately needs the server-level default.
+        if self.provider in ("gemini", "vertexai") and self.gemini_safety_settings is None:
+            from ..config import _get_raw_config
+
+            try:
+                raw_config = _get_raw_config()
+                self.gemini_safety_settings = raw_config.llm_gemini_safety_settings
+            except Exception:
+                pass  # Config may not be initialized in test environments
+
+        # Create provider implementation using factory
+        self._provider_impl = create_llm_provider(
+            provider=self.provider,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
+            groq_service_tier=self.groq_service_tier,
+            openai_service_tier=self.openai_service_tier,
+            vertexai_project_id=vertexai_project_id,
+            vertexai_region=vertexai_region,
+            vertexai_credentials=vertexai_credentials,
+            gemini_safety_settings=self.gemini_safety_settings,
+        )
+
+        # Backward compatibility: Keep mock provider properties
+        self._mock_calls: list[dict] = []
+        self._mock_response: Any = None
+
+    @property
+    def _client(self) -> Any:
+        """
+        Get the OpenAI client for OpenAI-compatible providers.
+
+        This property provides backward compatibility for code that directly accesses
+        the _client attribute (e.g., benchmarks, memory_engine).
+
+        Returns:
+            AsyncOpenAI client instance for OpenAI-compatible providers, or None for other providers.
+        """
+        from .providers.openai_compatible_llm import OpenAICompatibleLLM
+
+        if isinstance(self._provider_impl, OpenAICompatibleLLM):
+            return self._provider_impl._client
+        return None
+
+    @property
+    def _gemini_client(self) -> Any:
+        """
+        Get the Gemini client for Gemini/VertexAI providers.
+
+        This property provides backward compatibility for code that directly accesses
+        the _gemini_client attribute.
+
+        Returns:
+            genai.Client instance for Gemini/VertexAI providers, or None for other providers.
+        """
+        from .providers.gemini_llm import GeminiLLM
+
+        if isinstance(self._provider_impl, GeminiLLM):
+            return self._provider_impl._client
+        return None
 
     async def verify_connection(self) -> None:
         """
@@ -108,21 +401,7 @@ class LLMProvider:
         Raises:
             RuntimeError: If the connection test fails.
         """
-        try:
-            logger.info(
-                f"Verifying LLM: provider={self.provider}, model={self.model}, base_url={self.base_url or 'default'}..."
-            )
-            await self.call(
-                messages=[{"role": "user", "content": "Say 'ok'"}],
-                max_completion_tokens=100,
-                max_retries=2,
-                initial_backoff=0.5,
-                max_backoff=2.0,
-            )
-            # If we get here without exception, the connection is working
-            logger.info(f"LLM verified: {self.provider}/{self.model}")
-        except Exception as e:
-            raise RuntimeError(f"LLM connection verification failed for {self.provider}/{self.model}: {e}") from e
+        await self._provider_impl.verify_connection()
 
     async def call(
         self,
@@ -135,6 +414,8 @@ class LLMProvider:
         initial_backoff: float = 1.0,
         max_backoff: float = 60.0,
         skip_validation: bool = False,
+        strict_schema: bool = False,
+        return_usage: bool = False,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -149,462 +430,232 @@ class LLMProvider:
             initial_backoff: Initial backoff time in seconds.
             max_backoff: Maximum backoff time in seconds.
             skip_validation: Return raw JSON without Pydantic validation.
+            strict_schema: Use strict JSON schema enforcement (OpenAI only). Guarantees all required fields.
+            return_usage: If True, return tuple (result, TokenUsage) instead of just result.
 
         Returns:
-            Parsed response if response_format is provided, otherwise text content.
+            If return_usage=False: Parsed response if response_format is provided, otherwise text content.
+            If return_usage=True: Tuple of (result, TokenUsage) with token counts from the LLM call.
 
         Raises:
             OutputTooLongError: If output exceeds token limits.
             Exception: Re-raises API errors after retries exhausted.
         """
         async with _global_llm_semaphore:
-            start_time = time.time()
+            # Delegate to provider implementation
+            result = await self._provider_impl.call(
+                messages=messages,
+                response_format=response_format,
+                max_completion_tokens=max_completion_tokens,
+                temperature=temperature,
+                scope=scope,
+                max_retries=max_retries,
+                initial_backoff=initial_backoff,
+                max_backoff=max_backoff,
+                skip_validation=skip_validation,
+                strict_schema=strict_schema,
+                return_usage=return_usage,
+            )
 
-            # Handle Gemini provider separately
-            if self.provider == "gemini":
-                return await self._call_gemini(
-                    messages, response_format, max_retries, initial_backoff, max_backoff, skip_validation, start_time
-                )
+            # Backward compatibility: Update mock call tracking for mock provider
+            # This allows existing tests using LLMProvider._mock_calls to continue working
+            if self.provider == "mock":
+                from .providers.mock_llm import MockLLM
 
-            # Handle Ollama with native API for structured output (better schema enforcement)
-            if self.provider == "ollama" and response_format is not None:
-                return await self._call_ollama_native(
-                    messages,
-                    response_format,
-                    max_completion_tokens,
-                    temperature,
-                    max_retries,
-                    initial_backoff,
-                    max_backoff,
-                    skip_validation,
-                    start_time,
-                )
+                if isinstance(self._provider_impl, MockLLM):
+                    # Sync the mock calls from provider implementation to wrapper
+                    self._mock_calls = self._provider_impl.get_mock_calls()
 
-            call_params = {
-                "model": self.model,
-                "messages": messages,
-            }
+            return result
 
-            # Check if model supports reasoning parameter (o1, o3, gpt-5 families)
-            model_lower = self.model.lower()
-            is_reasoning_model = any(x in model_lower for x in ["gpt-5", "o1", "o3", "deepseek"])
-
-            # For GPT-4 and GPT-4.1 models, cap max_completion_tokens to 32000
-            # For GPT-4o models, cap to 16384
-            is_gpt4_model = any(x in model_lower for x in ["gpt-4.1", "gpt-4-"])
-            is_gpt4o_model = "gpt-4o" in model_lower
-            if max_completion_tokens is not None:
-                if is_gpt4o_model and max_completion_tokens > 16384:
-                    max_completion_tokens = 16384
-                elif is_gpt4_model and max_completion_tokens > 32000:
-                    max_completion_tokens = 32000
-                # For reasoning models, max_completion_tokens includes reasoning + output tokens
-                # Enforce minimum of 16000 to ensure enough space for both
-                if is_reasoning_model and max_completion_tokens < 16000:
-                    max_completion_tokens = 16000
-                call_params["max_completion_tokens"] = max_completion_tokens
-
-            # GPT-5/o1/o3 family doesn't support custom temperature (only default 1)
-            if temperature is not None and not is_reasoning_model:
-                call_params["temperature"] = temperature
-
-            # Set reasoning_effort for reasoning models (OpenAI gpt-5, o1, o3)
-            if is_reasoning_model:
-                call_params["reasoning_effort"] = self.reasoning_effort
-
-            # Provider-specific parameters
-            if self.provider == "groq":
-                call_params["seed"] = DEFAULT_LLM_SEED
-                extra_body = {"service_tier": "auto"}
-                # Only add reasoning parameters for reasoning models
-                if is_reasoning_model:
-                    extra_body["include_reasoning"] = False
-                call_params["extra_body"] = extra_body
-
-            last_exception = None
-
-            for attempt in range(max_retries + 1):
-                try:
-                    if response_format is not None:
-                        # Add schema to system message for JSON mode
-                        if hasattr(response_format, "model_json_schema"):
-                            schema = response_format.model_json_schema()
-                            schema_msg = f"\n\nYou must respond with valid JSON matching this schema:\n{json.dumps(schema, indent=2)}"
-
-                            if call_params["messages"] and call_params["messages"][0].get("role") == "system":
-                                call_params["messages"][0]["content"] += schema_msg
-                            elif call_params["messages"]:
-                                call_params["messages"][0]["content"] = (
-                                    schema_msg + "\n\n" + call_params["messages"][0]["content"]
-                                )
-
-                        call_params["response_format"] = {"type": "json_object"}
-                        response = await self._client.chat.completions.create(**call_params)
-
-                        content = response.choices[0].message.content
-
-                        # Log raw LLM response for debugging JSON parse issues
-                        try:
-                            json_data = json.loads(content)
-                        except json.JSONDecodeError as json_err:
-                            # Truncate content for logging (first 500 and last 200 chars)
-                            content_preview = content[:500] if content else "<empty>"
-                            if content and len(content) > 700:
-                                content_preview = f"{content[:500]}...TRUNCATED...{content[-200:]}"
-                            logger.warning(
-                                f"JSON parse error from LLM response (attempt {attempt + 1}/{max_retries + 1}): {json_err}\n"
-                                f"  Model: {self.provider}/{self.model}\n"
-                                f"  Content length: {len(content) if content else 0} chars\n"
-                                f"  Content preview: {content_preview!r}\n"
-                                f"  Finish reason: {response.choices[0].finish_reason if response.choices else 'unknown'}"
-                            )
-                            # Retry on JSON parse errors - LLM may return valid JSON on next attempt
-                            if attempt < max_retries:
-                                backoff = min(initial_backoff * (2**attempt), max_backoff)
-                                await asyncio.sleep(backoff)
-                                last_exception = json_err
-                                continue
-                            else:
-                                logger.error(f"JSON parse error after {max_retries + 1} attempts, giving up")
-                                raise
-
-                        if skip_validation:
-                            result = json_data
-                        else:
-                            result = response_format.model_validate(json_data)
-                    else:
-                        response = await self._client.chat.completions.create(**call_params)
-                        result = response.choices[0].message.content
-
-                    # Log slow calls
-                    duration = time.time() - start_time
-                    usage = response.usage
-                    if duration > 10.0:
-                        ratio = max(1, usage.completion_tokens) / usage.prompt_tokens
-                        cached_tokens = 0
-                        if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
-                            cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0
-                        cache_info = f", cached_tokens={cached_tokens}" if cached_tokens > 0 else ""
-                        logger.info(
-                            f"slow llm call: model={self.provider}/{self.model}, "
-                            f"input_tokens={usage.prompt_tokens}, output_tokens={usage.completion_tokens}, "
-                            f"total_tokens={usage.total_tokens}{cache_info}, time={duration:.3f}s, ratio out/in={ratio:.2f}"
-                        )
-
-                    return result
-
-                except LengthFinishReasonError as e:
-                    logger.warning(f"LLM output exceeded token limits: {str(e)}")
-                    raise OutputTooLongError(
-                        "LLM output exceeded token limits. Input may need to be split into smaller chunks."
-                    ) from e
-
-                except APIConnectionError as e:
-                    last_exception = e
-                    if attempt < max_retries:
-                        status_code = getattr(e, "status_code", None) or getattr(
-                            getattr(e, "response", None), "status_code", None
-                        )
-                        logger.warning(
-                            f"Connection error, retrying... (attempt {attempt + 1}/{max_retries + 1}) - status_code={status_code}, message={e}"
-                        )
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        await asyncio.sleep(backoff)
-                        continue
-                    else:
-                        logger.error(f"Connection error after {max_retries + 1} attempts: {str(e)}")
-                        raise
-
-                except APIStatusError as e:
-                    # Fast fail only on 401 (unauthorized) and 403 (forbidden) - these won't recover with retries
-                    if e.status_code in (401, 403):
-                        logger.error(f"Auth error (HTTP {e.status_code}), not retrying: {str(e)}")
-                        raise
-
-                    last_exception = e
-                    if attempt < max_retries:
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        jitter = backoff * 0.2 * (2 * (time.time() % 1) - 1)
-                        sleep_time = backoff + jitter
-                        await asyncio.sleep(sleep_time)
-                    else:
-                        logger.error(f"API error after {max_retries + 1} attempts: {str(e)}")
-                        raise
-
-                except Exception as e:
-                    logger.error(f"Unexpected error during LLM call: {type(e).__name__}: {str(e)}")
-                    raise
-
-            if last_exception:
-                raise last_exception
-            raise RuntimeError("LLM call failed after all retries with no exception captured")
-
-    async def _call_ollama_native(
+    async def call_with_tools(
         self,
-        messages: list[dict[str, str]],
-        response_format: Any,
-        max_completion_tokens: int | None,
-        temperature: float | None,
-        max_retries: int,
-        initial_backoff: float,
-        max_backoff: float,
-        skip_validation: bool,
-        start_time: float,
-    ) -> Any:
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_completion_tokens: int | None = None,
+        temperature: float | None = None,
+        scope: str = "tools",
+        max_retries: int = 5,
+        initial_backoff: float = 1.0,
+        max_backoff: float = 30.0,
+        tool_choice: str | dict[str, Any] = "auto",
+    ) -> "LLMToolCallResult":
         """
-        Call Ollama using native API with JSON schema enforcement.
+        Make an LLM API call with tool/function calling support.
 
-        Ollama's native API supports passing a full JSON schema in the 'format' parameter,
-        which provides better structured output control than the OpenAI-compatible API.
+        Args:
+            messages: List of message dicts. Can include tool results with role='tool'.
+            tools: List of tool definitions in OpenAI format.
+            max_completion_tokens: Maximum tokens in response.
+            temperature: Sampling temperature (0.0-2.0).
+            scope: Scope identifier for tracking.
+            max_retries: Maximum retry attempts.
+            initial_backoff: Initial backoff time in seconds.
+            max_backoff: Maximum backoff time in seconds.
+            tool_choice: How to choose tools - "auto", "none", "required", or {"type": "function", "function": {"name": "..."}}
+
+        Returns:
+            LLMToolCallResult with content and/or tool_calls.
         """
-        # Get the JSON schema from the Pydantic model
-        schema = response_format.model_json_schema() if hasattr(response_format, "model_json_schema") else None
+        async with _global_llm_semaphore:
+            # Delegate to provider implementation
+            result = await self._provider_impl.call_with_tools(
+                messages=messages,
+                tools=tools,
+                max_completion_tokens=max_completion_tokens,
+                temperature=temperature,
+                scope=scope,
+                max_retries=max_retries,
+                initial_backoff=initial_backoff,
+                max_backoff=max_backoff,
+                tool_choice=tool_choice,
+            )
 
-        # Build the base URL for Ollama's native API
-        # Default OpenAI-compatible URL is http://localhost:11434/v1
-        # Native API is at http://localhost:11434/api/chat
-        base_url = self.base_url or "http://localhost:11434/v1"
-        if base_url.endswith("/v1"):
-            native_url = base_url[:-3] + "/api/chat"
-        else:
-            native_url = base_url.rstrip("/") + "/api/chat"
+            # Backward compatibility: Update mock call tracking for mock provider
+            # This allows existing tests using LLMProvider._mock_calls to continue working
+            if self.provider == "mock":
+                from .providers.mock_llm import MockLLM
 
-        # Build request payload
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-        }
+                if isinstance(self._provider_impl, MockLLM):
+                    # Sync the mock calls from provider implementation to wrapper
+                    self._mock_calls = self._provider_impl.get_mock_calls()
 
-        # Add schema as format parameter for structured output
-        if schema:
-            payload["format"] = schema
+            return result
 
-        # Add optional parameters with optimized defaults for Ollama
-        # Benchmarking shows num_ctx=16384 + num_batch=512 is optimal
-        options = {
-            "num_ctx": 16384,  # 16k context window for larger prompts
-            "num_batch": 512,  # Optimal batch size for prompt processing
-        }
-        if max_completion_tokens:
-            options["num_predict"] = max_completion_tokens
-        if temperature is not None:
-            options["temperature"] = temperature
-        payload["options"] = options
+    def set_response_callback(self, fn: Any) -> None:
+        """Set a callback invoked on each call() instead of the fixed mock response."""
+        if self.provider == "mock":
+            from .providers.mock_llm import MockLLM
 
-        last_exception = None
+            if isinstance(self._provider_impl, MockLLM):
+                self._provider_impl.set_response_callback(fn)
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            for attempt in range(max_retries + 1):
-                try:
-                    response = await client.post(native_url, json=payload)
-                    response.raise_for_status()
+    def set_mock_response(self, response: Any) -> None:
+        """Set the response to return from mock calls."""
+        # Backward compatibility: Store in both wrapper and provider implementation
+        self._mock_response = response
+        if self.provider == "mock":
+            from .providers.mock_llm import MockLLM
 
-                    result = response.json()
-                    content = result.get("message", {}).get("content", "")
+            if isinstance(self._provider_impl, MockLLM):
+                self._provider_impl.set_mock_response(response)
 
-                    # Parse JSON response
-                    try:
-                        json_data = json.loads(content)
-                    except json.JSONDecodeError as json_err:
-                        content_preview = content[:500] if content else "<empty>"
-                        if content and len(content) > 700:
-                            content_preview = f"{content[:500]}...TRUNCATED...{content[-200:]}"
-                        logger.warning(
-                            f"Ollama JSON parse error (attempt {attempt + 1}/{max_retries + 1}): {json_err}\n"
-                            f"  Model: ollama/{self.model}\n"
-                            f"  Content length: {len(content) if content else 0} chars\n"
-                            f"  Content preview: {content_preview!r}"
-                        )
-                        if attempt < max_retries:
-                            backoff = min(initial_backoff * (2**attempt), max_backoff)
-                            await asyncio.sleep(backoff)
-                            last_exception = json_err
-                            continue
-                        else:
-                            raise
+    def get_mock_calls(self) -> list[dict]:
+        """Get the list of recorded mock calls."""
+        # Backward compatibility: Read from provider implementation if mock provider
+        if self.provider == "mock":
+            from .providers.mock_llm import MockLLM
 
-                    # Validate against Pydantic model or return raw JSON
-                    if skip_validation:
-                        return json_data
-                    else:
-                        return response_format.model_validate(json_data)
+            if isinstance(self._provider_impl, MockLLM):
+                return self._provider_impl.get_mock_calls()
+        return self._mock_calls
 
-                except httpx.HTTPStatusError as e:
-                    last_exception = e
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"Ollama HTTP error (attempt {attempt + 1}/{max_retries + 1}): {e.response.status_code}"
-                        )
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        await asyncio.sleep(backoff)
-                        continue
-                    else:
-                        logger.error(f"Ollama HTTP error after {max_retries + 1} attempts: {e}")
-                        raise
+    def clear_mock_calls(self) -> None:
+        """Clear the recorded mock calls."""
+        # Backward compatibility: Clear in both wrapper and provider implementation
+        self._mock_calls = []
+        if self.provider == "mock":
+            from .providers.mock_llm import MockLLM
 
-                except httpx.RequestError as e:
-                    last_exception = e
-                    if attempt < max_retries:
-                        logger.warning(f"Ollama connection error (attempt {attempt + 1}/{max_retries + 1}): {e}")
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        await asyncio.sleep(backoff)
-                        continue
-                    else:
-                        logger.error(f"Ollama connection error after {max_retries + 1} attempts: {e}")
-                        raise
+            if isinstance(self._provider_impl, MockLLM):
+                self._provider_impl.clear_mock_calls()
 
-                except Exception as e:
-                    logger.error(f"Unexpected error during Ollama call: {type(e).__name__}: {e}")
-                    raise
+    def _load_codex_auth(self) -> tuple[str, str]:
+        """
+        Load OAuth credentials from ~/.codex/auth.json.
 
-        if last_exception:
-            raise last_exception
-        raise RuntimeError("Ollama call failed after all retries")
+        Returns:
+            Tuple of (access_token, account_id).
 
-    async def _call_gemini(
-        self,
-        messages: list[dict[str, str]],
-        response_format: Any | None,
-        max_retries: int,
-        initial_backoff: float,
-        max_backoff: float,
-        skip_validation: bool,
-        start_time: float,
-    ) -> Any:
-        """Handle Gemini-specific API calls."""
-        # Convert OpenAI-style messages to Gemini format
-        system_instruction = None
-        gemini_contents = []
+        Raises:
+            FileNotFoundError: If auth file doesn't exist.
+            ValueError: If auth file is invalid.
+        """
+        auth_file = Path.home() / ".codex" / "auth.json"
 
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
+        if not auth_file.exists():
+            raise FileNotFoundError(
+                f"Codex auth file not found: {auth_file}\nRun 'codex auth login' to authenticate with ChatGPT Plus/Pro."
+            )
 
-            if role == "system":
-                if system_instruction:
-                    system_instruction += "\n\n" + content
-                else:
-                    system_instruction = content
-            elif role == "assistant":
-                gemini_contents.append(genai_types.Content(role="model", parts=[genai_types.Part(text=content)]))
-            else:
-                gemini_contents.append(genai_types.Content(role="user", parts=[genai_types.Part(text=content)]))
+        with open(auth_file) as f:
+            data = json.load(f)
 
-        # Add JSON schema instruction if response_format is provided
-        if response_format is not None and hasattr(response_format, "model_json_schema"):
-            schema = response_format.model_json_schema()
-            schema_msg = f"\n\nYou must respond with valid JSON matching this schema:\n{json.dumps(schema, indent=2)}"
-            if system_instruction:
-                system_instruction += schema_msg
-            else:
-                system_instruction = schema_msg
+        # Validate auth structure
+        auth_mode = data.get("auth_mode")
+        if auth_mode != "chatgpt":
+            raise ValueError(f"Expected auth_mode='chatgpt', got: {auth_mode}")
 
-        # Build generation config
-        config_kwargs = {}
-        if system_instruction:
-            config_kwargs["system_instruction"] = system_instruction
-        if response_format is not None:
-            config_kwargs["response_mime_type"] = "application/json"
-            config_kwargs["response_schema"] = response_format
+        tokens = data.get("tokens", {})
+        access_token = tokens.get("access_token")
+        account_id = tokens.get("account_id")
 
-        generation_config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+        if not access_token:
+            raise ValueError("No access_token found in Codex auth file. Run 'codex auth login' again.")
 
-        last_exception = None
+        return access_token, account_id
 
-        for attempt in range(max_retries + 1):
-            try:
-                response = await self._gemini_client.aio.models.generate_content(
-                    model=self.model,
-                    contents=gemini_contents,
-                    config=generation_config,
-                )
+    def _verify_claude_code_available(self) -> None:
+        """
+        Verify that Claude Agent SDK can be imported and is properly configured.
 
-                content = response.text
+        Raises:
+            ImportError: If Claude Agent SDK is not installed.
+            RuntimeError: If Claude Code is not authenticated.
+        """
+        try:
+            # Import Claude Agent SDK
+            # Reduce Claude Agent SDK logging verbosity
+            import logging as sdk_logging
 
-                # Handle empty response
-                if content is None:
-                    block_reason = None
-                    if hasattr(response, "candidates") and response.candidates:
-                        candidate = response.candidates[0]
-                        if hasattr(candidate, "finish_reason"):
-                            block_reason = candidate.finish_reason
+            from claude_agent_sdk import query  # noqa: F401
 
-                    if attempt < max_retries:
-                        logger.warning(f"Gemini returned empty response (reason: {block_reason}), retrying...")
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        await asyncio.sleep(backoff)
-                        continue
-                    else:
-                        raise RuntimeError(f"Gemini returned empty response after {max_retries + 1} attempts")
+            sdk_logging.getLogger("claude_agent_sdk").setLevel(sdk_logging.WARNING)
+            sdk_logging.getLogger("claude_agent_sdk._internal").setLevel(sdk_logging.WARNING)
 
-                if response_format is not None:
-                    json_data = json.loads(content)
-                    if skip_validation:
-                        result = json_data
-                    else:
-                        result = response_format.model_validate(json_data)
-                else:
-                    result = content
+            logger.debug("Claude Agent SDK imported successfully")
+        except ImportError as e:
+            raise ImportError(
+                "Claude Agent SDK not installed. Run: uv add claude-agent-sdk or pip install claude-agent-sdk"
+            ) from e
 
-                # Log slow calls
-                duration = time.time() - start_time
-                if duration > 10.0 and hasattr(response, "usage_metadata") and response.usage_metadata:
-                    usage = response.usage_metadata
-                    logger.info(
-                        f"slow llm call: model={self.provider}/{self.model}, "
-                        f"input_tokens={usage.prompt_token_count}, output_tokens={usage.candidates_token_count}, "
-                        f"time={duration:.3f}s"
-                    )
+        # SDK will automatically check for authentication when first used
+        # No need to verify here - let it fail gracefully on first call with helpful error
 
-                return result
+    def with_config(self, config: Any) -> "ConfiguredLLMProvider":
+        """
+        Return a configured wrapper for a specific bank operation.
 
-            except json.JSONDecodeError as e:
-                last_exception = e
-                if attempt < max_retries:
-                    logger.warning("Gemini returned invalid JSON, retrying...")
-                    backoff = min(initial_backoff * (2**attempt), max_backoff)
-                    await asyncio.sleep(backoff)
-                    continue
-                else:
-                    logger.error(f"Gemini returned invalid JSON after {max_retries + 1} attempts")
-                    raise
+        The wrapper applies per-bank overrides (e.g. Gemini safety settings)
+        to every ``call()`` / ``call_with_tools()`` invocation without
+        changing the underlying provider or its long-lived client connection.
 
-            except genai_errors.APIError as e:
-                # Fast fail only on 401 (unauthorized) and 403 (forbidden) - these won't recover with retries
-                if e.code in (401, 403):
-                    logger.error(f"Gemini auth error (HTTP {e.code}), not retrying: {str(e)}")
-                    raise
+        Args:
+            config: Resolved ``HindsightConfig`` for the current bank/request.
 
-                # Retry on retryable errors (rate limits, server errors, and other client errors like 400)
-                if e.code in (400, 429, 500, 502, 503, 504) or (e.code and e.code >= 500):
-                    last_exception = e
-                    if attempt < max_retries:
-                        backoff = min(initial_backoff * (2**attempt), max_backoff)
-                        jitter = backoff * 0.2 * (2 * (time.time() % 1) - 1)
-                        await asyncio.sleep(backoff + jitter)
-                    else:
-                        logger.error(f"Gemini API error after {max_retries + 1} attempts: {str(e)}")
-                        raise
-                else:
-                    logger.error(f"Gemini API error: {type(e).__name__}: {str(e)}")
-                    raise
+        Returns:
+            A ``ConfiguredLLMProvider`` that delegates to this provider with
+            the supplied config applied.
+        """
+        return ConfiguredLLMProvider(self, config.llm_gemini_safety_settings)
 
-            except Exception as e:
-                logger.error(f"Unexpected error during Gemini call: {type(e).__name__}: {str(e)}")
-                raise
-
-        if last_exception:
-            raise last_exception
-        raise RuntimeError("Gemini call failed after all retries")
+    async def cleanup(self) -> None:
+        """Clean up resources."""
+        pass
 
     @classmethod
     def for_memory(cls) -> "LLMProvider":
         """Create provider for memory operations from environment variables."""
         provider = os.getenv("HINDSIGHT_API_LLM_PROVIDER", "groq")
-        api_key = os.getenv("HINDSIGHT_API_LLM_API_KEY")
-        if not api_key:
-            raise ValueError("HINDSIGHT_API_LLM_API_KEY environment variable is required")
+        api_key = os.getenv("HINDSIGHT_API_LLM_API_KEY", "")
+
+        # API key not needed for openai-codex (uses OAuth), claude-code (uses Keychain OAuth),
+        # ollama (local), or vertexai (uses GCP service account credentials)
+        if not api_key and provider not in ("openai-codex", "claude-code", "ollama", "vertexai"):
+            raise ValueError(
+                "HINDSIGHT_API_LLM_API_KEY environment variable is required (unless using openai-codex or claude-code)"
+            )
+
         base_url = os.getenv("HINDSIGHT_API_LLM_BASE_URL", "")
         model = os.getenv("HINDSIGHT_API_LLM_MODEL", "openai/gpt-oss-120b")
 
@@ -614,11 +665,16 @@ class LLMProvider:
     def for_answer_generation(cls) -> "LLMProvider":
         """Create provider for answer generation. Falls back to memory config if not set."""
         provider = os.getenv("HINDSIGHT_API_ANSWER_LLM_PROVIDER", os.getenv("HINDSIGHT_API_LLM_PROVIDER", "groq"))
-        api_key = os.getenv("HINDSIGHT_API_ANSWER_LLM_API_KEY", os.getenv("HINDSIGHT_API_LLM_API_KEY"))
-        if not api_key:
+        api_key = os.getenv("HINDSIGHT_API_ANSWER_LLM_API_KEY", os.getenv("HINDSIGHT_API_LLM_API_KEY", ""))
+
+        # API key not needed for openai-codex (uses OAuth), claude-code (uses Keychain OAuth),
+        # ollama (local), or vertexai (uses GCP service account credentials)
+        if not api_key and provider not in ("openai-codex", "claude-code", "ollama", "vertexai"):
             raise ValueError(
-                "HINDSIGHT_API_LLM_API_KEY or HINDSIGHT_API_ANSWER_LLM_API_KEY environment variable is required"
+                "HINDSIGHT_API_LLM_API_KEY or HINDSIGHT_API_ANSWER_LLM_API_KEY environment variable is required "
+                "(unless using openai-codex or claude-code)"
             )
+
         base_url = os.getenv("HINDSIGHT_API_ANSWER_LLM_BASE_URL", os.getenv("HINDSIGHT_API_LLM_BASE_URL", ""))
         model = os.getenv("HINDSIGHT_API_ANSWER_LLM_MODEL", os.getenv("HINDSIGHT_API_LLM_MODEL", "openai/gpt-oss-120b"))
 
@@ -628,15 +684,73 @@ class LLMProvider:
     def for_judge(cls) -> "LLMProvider":
         """Create provider for judge/evaluator operations. Falls back to memory config if not set."""
         provider = os.getenv("HINDSIGHT_API_JUDGE_LLM_PROVIDER", os.getenv("HINDSIGHT_API_LLM_PROVIDER", "groq"))
-        api_key = os.getenv("HINDSIGHT_API_JUDGE_LLM_API_KEY", os.getenv("HINDSIGHT_API_LLM_API_KEY"))
-        if not api_key:
+        api_key = os.getenv("HINDSIGHT_API_JUDGE_LLM_API_KEY", os.getenv("HINDSIGHT_API_LLM_API_KEY", ""))
+
+        # API key not needed for openai-codex (uses OAuth), claude-code (uses Keychain OAuth),
+        # ollama (local), or vertexai (uses GCP service account credentials)
+        if not api_key and provider not in ("openai-codex", "claude-code", "ollama", "vertexai"):
             raise ValueError(
-                "HINDSIGHT_API_LLM_API_KEY or HINDSIGHT_API_JUDGE_LLM_API_KEY environment variable is required"
+                "HINDSIGHT_API_LLM_API_KEY or HINDSIGHT_API_JUDGE_LLM_API_KEY environment variable is required "
+                "(unless using openai-codex or claude-code)"
             )
+
         base_url = os.getenv("HINDSIGHT_API_JUDGE_LLM_BASE_URL", os.getenv("HINDSIGHT_API_LLM_BASE_URL", ""))
         model = os.getenv("HINDSIGHT_API_JUDGE_LLM_MODEL", os.getenv("HINDSIGHT_API_LLM_MODEL", "openai/gpt-oss-120b"))
 
         return cls(provider=provider, api_key=api_key, base_url=base_url, model=model, reasoning_effort="high")
+
+
+class ConfiguredLLMProvider:
+    """
+    Thin wrapper around LLMProvider that applies bank-specific config to every call.
+
+    Obtained via ``LLMProvider.with_config(resolved_config)``.  The wrapper
+    sets any provider-specific overrides (currently Gemini safety settings)
+    immediately before each call using a ContextVar token, then resets it
+    afterwards — so nesting is safe and the configuration cannot leak across
+    operations.
+
+    All attribute access falls through to the underlying provider so callers
+    that read ``llm.provider``, ``llm.model``, etc. continue to work without
+    any changes.
+    """
+
+    def __init__(self, provider: "LLMProvider", gemini_safety_settings: list | None) -> None:
+        # Use object.__setattr__ to avoid triggering __getattr__
+        object.__setattr__(self, "_provider", provider)
+        object.__setattr__(self, "_gemini_safety_settings", gemini_safety_settings)
+
+    # ── attribute passthrough ──────────────────────────────────────────────────
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_provider"), name)
+
+    # ── overridden call methods ────────────────────────────────────────────────
+
+    async def call(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
+        from .providers.gemini_llm import _safety_settings_ctx
+
+        token = _safety_settings_ctx.set(object.__getattribute__(self, "_gemini_safety_settings"))
+        try:
+            return await object.__getattribute__(self, "_provider").call(messages=messages, **kwargs)
+        finally:
+            _safety_settings_ctx.reset(token)
+
+    async def call_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> "LLMToolCallResult":
+        from .providers.gemini_llm import _safety_settings_ctx
+
+        token = _safety_settings_ctx.set(object.__getattribute__(self, "_gemini_safety_settings"))
+        try:
+            return await object.__getattribute__(self, "_provider").call_with_tools(
+                messages=messages, tools=tools, **kwargs
+            )
+        finally:
+            _safety_settings_ctx.reset(token)
 
 
 # Backwards compatibility alias

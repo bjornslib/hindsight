@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { BankProvider } from "@/lib/bank-context";
+import { FeaturesProvider } from "@/lib/features-context";
 import { ThemeProvider } from "@/lib/theme-context";
+import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
   title: "Hindsight Control Plane",
@@ -20,8 +22,11 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="bg-background text-foreground">
         <ThemeProvider>
-          <BankProvider>{children}</BankProvider>
+          <FeaturesProvider>
+            <BankProvider>{children}</BankProvider>
+          </FeaturesProvider>
         </ThemeProvider>
+        <Toaster />
       </body>
     </html>
   );

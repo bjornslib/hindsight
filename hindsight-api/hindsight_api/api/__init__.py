@@ -5,7 +5,7 @@ Provides both HTTP REST API and MCP (Model Context Protocol) server.
 """
 
 import logging
-from typing import Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -45,6 +45,18 @@ def create_app(
         # Both HTTP and MCP
         app = create_app(memory, mcp_api_enabled=True)
     """
+    mcp_servers = None
+
+    # Create MCP servers first if enabled (we need their lifespans for chaining)
+    if mcp_api_enabled:
+        try:
+            from .mcp import MCPMiddleware, create_mcp_servers
+
+            mcp_servers = create_mcp_servers(memory=memory)
+        except ImportError as e:
+            logger.error(f"MCP server requested but dependencies not available: {e}")
+            logger.error("Install with: pip install hindsight-api[mcp]")
+            raise
 
     # Import and create HTTP API if enabled
     if http_api_enabled:
@@ -57,20 +69,42 @@ def create_app(
         app = FastAPI(title="Hindsight API", version="0.0.7")
         logger.info("HTTP REST API disabled")
 
-    # Mount MCP server if enabled
-    if mcp_api_enabled:
-        try:
-            from .mcp import create_mcp_app
+    # Add MCP middleware and chain its lifespan if enabled
+    if mcp_servers is not None:
+        multi_bank_server, single_bank_server, multi_bank_starlette_app, single_bank_starlette_app = mcp_servers
 
-            # Create MCP app with dynamic bank_id support
-            # Supports: /mcp/{bank_id}/sse (bank-specific SSE endpoint)
-            mcp_app = create_mcp_app(memory=memory)
-            app.mount(mcp_mount_path, mcp_app)
-            logger.info(f"MCP server enabled at {mcp_mount_path}/{{bank_id}}/sse")
-        except ImportError as e:
-            logger.error(f"MCP server requested but dependencies not available: {e}")
-            logger.error("Install with: pip install hindsight-api[mcp]")
-            raise
+        # Store the original lifespan
+        original_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def chained_lifespan(app_instance: FastAPI):
+            """Chain both MCP lifespans with the main app lifespan."""
+            # Start both MCP lifespans (multi-bank and single-bank)
+            async with multi_bank_starlette_app.router.lifespan_context(multi_bank_starlette_app):
+                async with single_bank_starlette_app.router.lifespan_context(single_bank_starlette_app):
+                    logger.info("MCP lifespans started (multi-bank and single-bank)")
+                    # Then start the original app lifespan
+                    async with original_lifespan(app_instance):
+                        yield
+                logger.info("MCP lifespans stopped")
+
+        # Replace the app's lifespan with the chained version
+        app.router.lifespan_context = chained_lifespan
+
+        # Add MCP as a wrapping middleware — intercepts /mcp* requests directly,
+        # passes everything else through to the FastAPI app. No Starlette Mount
+        # means no 307 redirect for /mcp (no trailing slash).
+        app.add_middleware(
+            MCPMiddleware,
+            memory=memory,
+            prefix=mcp_mount_path,
+            multi_bank_app=multi_bank_starlette_app,
+            single_bank_app=single_bank_starlette_app,
+            multi_bank_server=multi_bank_server,
+            single_bank_server=single_bank_server,
+        )
+
+        logger.info(f"MCP server enabled at {mcp_mount_path}/")
 
     return app
 

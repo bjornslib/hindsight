@@ -4,14 +4,14 @@ Syncs content from the hindsight-cookbook repository.
 
 - Clones the cookbook repo to a temp directory
 - Converts notebooks/*.ipynb → docs/cookbook/recipes/*.md
-- Converts app directories (with README.md) → docs/cookbook/applications/*.md
+- Converts applications/*/ directories (with README.md) → docs/cookbook/applications/*.md
 - Updates sidebars.ts with the new entries
 
 Usage: sync-cookbook (after installing hindsight-dev)
 
 Conventions in cookbook repo:
 - notebooks/*.ipynb → Recipes (use cases, tutorials)
-- Directories with README.md at root → Applications (complete apps)
+- applications/*/ directories with README.md → Applications (complete apps)
 - Notebook title extracted from first # heading in first markdown cell
 - App title extracted from first # heading in README.md
 """
@@ -29,16 +29,9 @@ IGNORE_DIRS = {".git", "notebooks", "node_modules", "__pycache__", ".venv", "ven
 
 
 def get_docs_dir() -> Path:
-    """Find the hindsight-docs directory relative to this script."""
-    # Navigate from hindsight-dev to hindsight-docs
+    """Find the hindsight-docs src/pages/cookbook directory relative to this script."""
     script_dir = Path(__file__).parent
-    docs_dir = script_dir.parent.parent / "hindsight-docs" / "docs" / "cookbook"
-    return docs_dir
-
-
-def get_sidebars_file() -> Path:
-    script_dir = Path(__file__).parent
-    return script_dir.parent.parent / "hindsight-docs" / "sidebars.ts"
+    return script_dir.parent.parent / "hindsight-docs" / "src" / "pages" / "cookbook"
 
 
 def slugify(filename: str) -> str:
@@ -70,35 +63,128 @@ def extract_title_from_notebook(notebook_path: Path) -> str:
 
 
 def extract_description_from_notebook(notebook_path: Path) -> str | None:
-    """Extract first paragraph after title from notebook."""
+    """Extract description from notebook metadata."""
     try:
         content = json.loads(notebook_path.read_text())
-        for cell in content.get("cells", []):
-            if cell.get("cell_type") == "markdown":
-                source = cell.get("source", [])
-                if isinstance(source, list):
-                    source = "".join(source)
-
-                lines = source.split("\n")
-                found_title = False
-                description = []
-
-                for line in lines:
-                    if line.startswith("#"):
-                        found_title = True
-                        continue
-                    if found_title and line.strip():
-                        if line.startswith("#"):
-                            break
-                        description.append(line.strip())
-                        if line.strip().endswith("."):
-                            break
-
-                if description:
-                    return " ".join(description)[:200]
+        metadata = content.get("metadata", {})
+        description = metadata.get("description", "")
+        if description:
+            return description[:200]
     except Exception:
         pass
     return None
+
+
+def extract_tags_from_notebook(notebook_path: Path) -> dict[str, str]:
+    """Extract tags from notebook metadata.
+
+    Supports both array format and structured object format.
+    Returns a dict with keys like 'sdk', 'topic', 'language'.
+    """
+    try:
+        content = json.loads(notebook_path.read_text())
+        metadata = content.get("metadata", {})
+        tags = metadata.get("tags", [])
+
+        # Object format already has the right structure
+        if isinstance(tags, dict):
+            return {k: v for k, v in tags.items() if v}
+
+        # Array format: fall back to heuristic conversion
+        if isinstance(tags, list):
+            return _infer_tags_from_list(tags)
+    except Exception:
+        pass
+    return {}
+
+
+def extract_description_from_readme(readme_path: Path) -> str | None:
+    """Extract description from frontmatter in README."""
+    try:
+        content = readme_path.read_text()
+        # Check for frontmatter
+        if content.startswith("---"):
+            end_idx = content.find("---", 3)
+            if end_idx > 0:
+                frontmatter = content[3:end_idx]
+                # Look for description: line
+                for line in frontmatter.split("\n"):
+                    if line.strip().startswith("description:"):
+                        desc = line.split("description:", 1)[1].strip()
+                        # Remove quotes if present
+                        desc = desc.strip('"').strip("'")
+                        return desc[:200]
+    except Exception:
+        pass
+    return None
+
+
+def extract_tags_from_readme(readme_path: Path) -> dict[str, str]:
+    """Extract tags from frontmatter in README if present.
+
+    Supports multiple formats:
+    - Array: tags: ["Python", "Client"]
+    - Structured YAML: tags:\n  sdk: "hindsight-client"\n  topic: "Learning"
+    - Object literal: tags: { sdk: "hindsight-client", topic: "Learning" }
+
+    Returns a dict with keys like 'sdk', 'topic', 'language'.
+    """
+    try:
+        content = readme_path.read_text()
+        if content.startswith("---"):
+            end_idx = content.find("---", 3)
+            if end_idx > 0:
+                frontmatter = content[3:end_idx]
+                lines = frontmatter.split("\n")
+
+                for i, line in enumerate(lines):
+                    if line.strip().startswith("tags:"):
+                        tags_str = line.split("tags:", 1)[1].strip()
+
+                        # Inline array format: tags: ["Python", "Client"]
+                        if tags_str.startswith("["):
+                            tags_str = tags_str.strip("[]")
+                            values = [t.strip().strip('"').strip("'") for t in tags_str.split(",")]
+                            return _infer_tags_from_list(values)
+
+                        # Object literal: tags: { sdk: "hindsight-client", topic: "Learning" }
+                        if tags_str.startswith("{"):
+                            obj_str = tags_str
+                            if "}" not in obj_str:
+                                for j in range(i + 1, len(lines)):
+                                    obj_str += " " + lines[j].strip()
+                                    if "}" in lines[j]:
+                                        break
+                            result = {}
+                            for pair in obj_str.strip("{}").split(","):
+                                if ":" in pair:
+                                    k, v = pair.split(":", 1)
+                                    k = k.strip().strip('"').strip("'")
+                                    v = v.strip().strip('"').strip("'")
+                                    if k and v:
+                                        result[k] = v
+                            return result
+
+                        # Structured YAML:
+                        # tags:
+                        #   sdk: "hindsight-client"
+                        #   topic: "Learning"
+                        if not tags_str:
+                            result = {}
+                            for j in range(i + 1, len(lines)):
+                                next_line = lines[j].strip()
+                                if not next_line or not next_line.startswith(("language:", "sdk:", "topic:")):
+                                    break
+                                if ":" in next_line:
+                                    k, v = next_line.split(":", 1)
+                                    k = k.strip()
+                                    v = v.strip().strip('"').strip("'")
+                                    if k and v:
+                                        result[k] = v
+                            return result
+    except Exception:
+        pass
+    return {}
 
 
 def extract_title_from_readme(readme_path: Path) -> str | None:
@@ -187,11 +273,15 @@ def process_notebooks(cookbook_dir: Path, recipes_dir: Path) -> list[dict]:
         slug = slugify(notebook_path.name)
         title = extract_title_from_notebook(notebook_path)
         description = extract_description_from_notebook(notebook_path)
+        tags = extract_tags_from_notebook(notebook_path)
 
         print(f"  Processing: {notebook_path.name} → {slug}.md")
 
         # Convert notebook to markdown
         md_content = convert_notebook_to_markdown(notebook_path)
+
+        # Strip any existing frontmatter from converted notebook
+        md_content = strip_frontmatter(md_content)
 
         # Create recipe page with frontmatter
         notebook_url = f"https://github.com/vectorize-io/hindsight-cookbook/blob/main/notebooks/{notebook_path.name}"
@@ -225,6 +315,7 @@ This recipe is available as an interactive Jupyter notebook.
                 "slug": slug,
                 "title": title,
                 "description": description,
+                "tags": tags,
                 "id": f"cookbook/recipes/{slug}",
             }
         )
@@ -232,11 +323,26 @@ This recipe is available as an interactive Jupyter notebook.
     return recipes
 
 
+def strip_frontmatter(content: str) -> str:
+    """Remove frontmatter from markdown content."""
+    if content.startswith("---"):
+        end_idx = content.find("---", 3)
+        if end_idx > 0:
+            return content[end_idx + 3 :].lstrip()
+    return content
+
+
 def process_applications(cookbook_dir: Path, apps_dir: Path) -> list[dict]:
     """Process application directories with README.md."""
     apps = []
 
-    for entry in sorted(cookbook_dir.iterdir()):
+    # Applications are now in the applications/ subdirectory
+    applications_dir = cookbook_dir / "applications"
+    if not applications_dir.exists():
+        print("  No applications directory found")
+        return apps
+
+    for entry in sorted(applications_dir.iterdir()):
         if not entry.is_dir() or entry.name in IGNORE_DIRS:
             continue
 
@@ -244,16 +350,31 @@ def process_applications(cookbook_dir: Path, apps_dir: Path) -> list[dict]:
         if not readme_path.exists():
             continue
 
+        # Validate that README has frontmatter
+        readme_raw = readme_path.read_text()
+        if not readme_raw.startswith("---"):
+            raise SystemExit(
+                f"Error: {readme_path} is missing frontmatter.\n"
+                f"Applications must have a frontmatter block (---) with 'description' and 'tags'."
+            )
+        closing = readme_raw.find("---", 3)
+        if closing <= 0:
+            raise SystemExit(f"Error: {readme_path} has malformed frontmatter (missing closing ---).")
+
         slug = entry.name
         title = extract_title_from_readme(readme_path) or " ".join(word.capitalize() for word in slug.split("-"))
+        description = extract_description_from_readme(readme_path)
+        tags = extract_tags_from_readme(readme_path)
 
         print(f"  Processing app: {entry.name} → {slug}.md")
 
-        # Read README content
+        # Read README content, strip existing frontmatter and local .md links
         readme_content = readme_path.read_text()
+        readme_content = strip_frontmatter(readme_content)
+        readme_content = strip_local_md_links(readme_content)
 
         # Create application page with frontmatter
-        app_url = f"https://github.com/vectorize-io/hindsight-cookbook/tree/main/{entry.name}"
+        app_url = f"https://github.com/vectorize-io/hindsight-cookbook/tree/main/applications/{entry.name}"
 
         frontmatter = f"""---
 sidebar_position: {len(apps) + 1}
@@ -283,6 +404,8 @@ This is a complete, runnable application demonstrating Hindsight integration.
             {
                 "slug": slug,
                 "title": title,
+                "description": description,
+                "tags": tags,
                 "id": f"cookbook/applications/{slug}",
             }
         )
@@ -291,61 +414,19 @@ This is a complete, runnable application demonstrating Hindsight integration.
 
 
 def update_sidebars(recipes: list[dict], apps: list[dict], sidebars_file: Path):
-    """Update sidebars.ts with new recipe and app entries."""
+    """Update sidebars.ts - keep it simple with just the index."""
     content = sidebars_file.read_text()
 
-    # Build recipe items
-    recipe_item_list = []
-    for r in recipes:
-        label = r["title"].replace("'", "\\'")
-        recipe_item_list.append(
-            f"""        {{
-          type: 'doc',
-          id: '{r["id"]}',
-          label: '{label}',
-        }}"""
-        )
-    recipe_items = ",\n".join(recipe_item_list)
-
-    # Build app items
-    app_item_list = []
-    for a in apps:
-        label = a["title"].replace("'", "\\'")
-        app_item_list.append(
-            f"""        {{
-          type: 'doc',
-          id: '{a["id"]}',
-          label: '{label}',
-        }}"""
-        )
-    app_items = ",\n".join(app_item_list)
-
-    new_cookbook_sidebar = f"""cookbookSidebar: [
-    {{
+    # Simple sidebar with just the cookbook index
+    new_cookbook_sidebar = """cookbookSidebar: [
+    {
       type: 'doc',
       id: 'cookbook/index',
-      label: 'Overview',
-    }},
-    {{
-      type: 'category',
-      label: 'Recipes',
-      collapsible: false,
-      items: [
-{recipe_items}
-      ],
-    }},
-    {{
-      type: 'category',
-      label: 'Applications',
-      collapsible: false,
-      items: [
-{app_items}
-      ],
-    }},
+      label: 'Cookbook',
+    },
   ]"""
 
-    # Replace existing cookbookSidebar - match the full sidebar array including nested structures
-    # We need to match balanced brackets
+    # Replace existing cookbookSidebar
     start = content.find("cookbookSidebar:")
     if start == -1:
         raise ValueError("cookbookSidebar not found in sidebars.ts")
@@ -377,6 +458,14 @@ def update_sidebars(recipes: list[dict], apps: list[dict], sidebars_file: Path):
     print("\nUpdated sidebars.ts")
 
 
+def strip_local_md_links(content: str) -> str:
+    """Replace relative .md links with plain text to avoid broken links in Docusaurus.
+
+    e.g. [see article](article.md) → see article
+    """
+    return re.sub(r"\[([^\]]+)\]\((?!https?://)([^)]+\.md)\)", r"\1", content)
+
+
 def clean_description(desc: str) -> str:
     """Clean description for display in carousel cards."""
     if not desc:
@@ -399,45 +488,114 @@ def clean_description(desc: str) -> str:
     return desc
 
 
+def _infer_tags_from_list(tags: list[str]) -> dict[str, str]:
+    """Infer sdk/topic structure from a plain list of tag values (legacy array format).
+
+    Uses heuristics: package names contain '@' or '-' or start lowercase → sdk,
+    everything else → topic.
+    """
+    result: dict[str, str] = {}
+    for tag in tags:
+        if "@" in tag or (tag and not tag[0].isupper()):
+            result["sdk"] = tag
+        else:
+            result["topic"] = tag
+    return result
+
+
 def update_cookbook_index(recipes: list[dict], apps: list[dict], docs_dir: Path):
     """Update cookbook/index.mdx with recipe and app carousels."""
-    # Build recipe items for the carousel
+    # Build recipe items for the carousel with descriptions and tags
     recipe_items = []
     for r in recipes:
         title = r["title"].replace('"', '\\"')
-        recipe_items.append(f'    {{ title: "{title}", href: "/cookbook/recipes/{r["slug"]}" }}')
+        description = r.get("description", "")
+        if description:
+            description = clean_description(description).replace('"', '\\"')
+        tags: dict[str, str] = r.get("tags", {})
+
+        item = f'    {{\n      title: "{title}",\n      href: "/cookbook/recipes/{r["slug"]}"'
+        if description:
+            item += f',\n      description: "{description}"'
+        if tags:
+            tags_parts = []
+            for key in ("language", "sdk", "topic"):
+                if key in tags:
+                    tags_parts.append(f'{key}: "{tags[key]}"')
+            if tags_parts:
+                item += f",\n      tags: {{ {', '.join(tags_parts)} }}"
+        item += "\n    }"
+        recipe_items.append(item)
+
     recipes_json = ",\n".join(recipe_items)
 
     # Build app items for the carousel
     app_items = []
     for a in apps:
         title = a["title"].replace('"', '\\"')
-        app_items.append(f'    {{ title: "{title}", href: "/cookbook/applications/{a["slug"]}" }}')
+        description = a.get("description", "")
+        if description:
+            description = clean_description(description).replace('"', '\\"')
+        tags = a.get("tags", {})
+
+        item = f'    {{\n      title: "{title}",\n      href: "/cookbook/applications/{a["slug"]}"'
+        if description:
+            item += f',\n      description: "{description}"'
+        if tags:
+            tags_parts = []
+            for key in ("language", "sdk", "topic"):
+                if key in tags:
+                    tags_parts.append(f'{key}: "{tags[key]}"')
+            if tags_parts:
+                item += f",\n      tags: {{ {', '.join(tags_parts)} }}"
+        item += "\n    }"
+        app_items.append(item)
+
     apps_json = ",\n".join(app_items)
 
     content = f"""---
-sidebar_position: 1
+title: Cookbook
+hide_table_of_contents: true
 ---
 
-import RecipeCarousel from '@site/src/components/RecipeCarousel';
+import CookbookGrid from '@site/src/components/CookbookGrid';
 
-# Cookbook
+<div>
 
-Practical patterns, recipes, and complete applications for building with Hindsight.
+<div style={{{{textAlign: 'center', marginBottom: '3.5rem'}}}}>
+  <h1 style={{{{
+    fontSize: '3rem',
+    fontWeight: 800,
+    background: 'linear-gradient(135deg, #0074d9, #009296)',
+    WebkitBackgroundClip: 'text',
+    WebkitTextFillColor: 'transparent',
+    backgroundClip: 'text',
+    letterSpacing: '-0.03em',
+    lineHeight: 1.15,
+    marginBottom: '0.75rem',
+  }}}}>Cookbook</h1>
+  <p style={{{{fontSize: '1.05rem', color: 'var(--ifm-color-emphasis-600)', maxWidth: 520, margin: '0 auto', lineHeight: 1.7}}}}>
+    Practical examples and complete applications built with Hindsight.
+  </p>
+</div>
 
-<RecipeCarousel
-  title="Recipes"
+## Recipes
+
+<CookbookGrid
   items={{[
 {recipes_json}
   ]}}
 />
 
-<RecipeCarousel
-  title="Applications"
+## Applications
+
+<CookbookGrid
   items={{[
 {apps_json}
   ]}}
 />
+
+</div>
 """
 
     index_path = docs_dir / "index.mdx"
@@ -451,20 +609,81 @@ Practical patterns, recipes, and complete applications for building with Hindsig
     print("Updated cookbook/index.mdx")
 
 
+def extract_existing_entries(docs_dir: Path) -> tuple[list[dict], list[dict]]:
+    """Extract existing recipe and app entries before syncing.
+
+    This allows us to preserve manually added entries that aren't in the cookbook repo.
+    Returns entries with their content stored in memory.
+    """
+    existing_recipes = []
+    existing_apps = []
+
+    recipes_dir = docs_dir / "recipes"
+    apps_dir = docs_dir / "applications"
+
+    # Scan existing recipes
+    if recipes_dir.exists():
+        for md_file in recipes_dir.glob("*.md"):
+            slug = md_file.stem
+            # Read file content
+            content = md_file.read_text()
+            # Try to extract title from first heading
+            title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            title = (
+                title_match.group(1).strip() if title_match else " ".join(word.capitalize() for word in slug.split("-"))
+            )
+
+            existing_recipes.append(
+                {
+                    "slug": slug,
+                    "title": title,
+                    "id": f"cookbook/recipes/{slug}",
+                    "content": content,  # Store content in memory
+                }
+            )
+
+    # Scan existing apps
+    if apps_dir.exists():
+        for md_file in apps_dir.glob("*.md"):
+            slug = md_file.stem
+            # Read file content
+            content = md_file.read_text()
+            # Try to extract title from first heading
+            title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            title = (
+                title_match.group(1).strip() if title_match else " ".join(word.capitalize() for word in slug.split("-"))
+            )
+
+            existing_apps.append(
+                {
+                    "slug": slug,
+                    "title": title,
+                    "id": f"cookbook/applications/{slug}",
+                    "content": content,  # Store content in memory
+                }
+            )
+
+    return existing_recipes, existing_apps
+
+
 def main():
     """Main entry point."""
     print("Syncing hindsight-cookbook...\n")
 
     docs_dir = get_docs_dir()
-    sidebars_file = get_sidebars_file()
     recipes_dir = docs_dir / "recipes"
     apps_dir = docs_dir / "applications"
+
+    # Extract existing entries before we delete anything
+    print("Scanning for existing manual entries...")
+    existing_recipes, existing_apps = extract_existing_entries(docs_dir)
+    print(f"  Found {len(existing_recipes)} existing recipes, {len(existing_apps)} existing apps")
 
     # Create temp directory and clone
     with tempfile.TemporaryDirectory() as tmpdir:
         cookbook_dir = Path(tmpdir) / "cookbook"
 
-        print(f"Cloning {COOKBOOK_REPO}...")
+        print(f"\nCloning {COOKBOOK_REPO}...")
         subprocess.run(
             ["git", "clone", "--depth", "1", COOKBOOK_REPO, str(cookbook_dir)],
             capture_output=True,
@@ -488,12 +707,52 @@ def main():
         print("\nProcessing applications...")
         apps = process_applications(cookbook_dir, apps_dir)
 
-        # Update sidebars.ts and index
-        if recipes or apps:
-            update_sidebars(recipes, apps, sidebars_file)
-            update_cookbook_index(recipes, apps, docs_dir)
+        # Restore manually added entries that aren't in the cookbook repo
+        print("\nRestoring manual entries...")
+        synced_recipe_slugs = {r["slug"] for r in recipes}
+        synced_app_slugs = {a["slug"] for a in apps}
 
-        print(f"\nDone! Generated {len(recipes)} recipes and {len(apps)} applications")
+        manual_recipes = []
+        for entry in existing_recipes:
+            if entry["slug"] not in synced_recipe_slugs:
+                # This was a manual entry - restore it
+                dest_path = recipes_dir / f"{entry['slug']}.md"
+                dest_path.write_text(entry["content"])
+                manual_recipes.append(
+                    {
+                        "slug": entry["slug"],
+                        "title": entry["title"],
+                        "id": entry["id"],
+                    }
+                )
+                print(f"  Restored recipe: {entry['slug']}")
+
+        manual_apps = []
+        for entry in existing_apps:
+            if entry["slug"] not in synced_app_slugs:
+                # This was a manual entry - restore it
+                dest_path = apps_dir / f"{entry['slug']}.md"
+                dest_path.write_text(entry["content"])
+                manual_apps.append(
+                    {
+                        "slug": entry["slug"],
+                        "title": entry["title"],
+                        "id": entry["id"],
+                    }
+                )
+                print(f"  Restored app: {entry['slug']}")
+
+        # Combine synced and manual entries
+        all_recipes = recipes + manual_recipes
+        all_apps = apps + manual_apps
+
+        # Update cookbook index
+        if all_recipes or all_apps:
+            update_cookbook_index(all_recipes, all_apps, docs_dir)
+
+        print(
+            f"\nDone! Generated {len(recipes)} recipes ({len(manual_recipes)} manual) and {len(apps)} apps ({len(manual_apps)} manual)"
+        )
 
 
 if __name__ == "__main__":

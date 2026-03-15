@@ -81,6 +81,22 @@ app.kubernetes.io/component: control-plane
 {{- end }}
 
 {{/*
+Worker labels
+*/}}
+{{- define "hindsight.worker.labels" -}}
+{{ include "hindsight.labels" . }}
+app.kubernetes.io/component: worker
+{{- end }}
+
+{{/*
+Worker selector labels
+*/}}
+{{- define "hindsight.worker.selectorLabels" -}}
+{{ include "hindsight.selectorLabels" . }}
+app.kubernetes.io/component: worker
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "hindsight.serviceAccountName" -}}
@@ -109,4 +125,47 @@ API URL for control plane
 */}}
 {{- define "hindsight.apiUrl" -}}
 {{- printf "http://%s-api:%d" (include "hindsight.fullname" .) (.Values.api.service.port | int) }}
+{{- end }}
+
+{{/*
+TEI reranker labels
+*/}}
+{{- define "hindsight.tei.reranker.labels" -}}
+{{ include "hindsight.labels" . }}
+app.kubernetes.io/component: tei-reranker
+{{- end }}
+
+{{/*
+TEI reranker selector labels
+*/}}
+{{- define "hindsight.tei.reranker.selectorLabels" -}}
+{{ include "hindsight.selectorLabels" . }}
+app.kubernetes.io/component: tei-reranker
+{{- end }}
+
+{{/*
+TEI embedding labels
+*/}}
+{{- define "hindsight.tei.embedding.labels" -}}
+{{ include "hindsight.labels" . }}
+app.kubernetes.io/component: tei-embedding
+{{- end }}
+
+{{/*
+TEI embedding selector labels
+*/}}
+{{- define "hindsight.tei.embedding.selectorLabels" -}}
+{{ include "hindsight.selectorLabels" . }}
+app.kubernetes.io/component: tei-embedding
+{{- end }}
+
+{{/*
+Get the name of the secret to use
+*/}}
+{{- define "hindsight.secretName" -}}
+{{- if .Values.existingSecret }}
+{{- .Values.existingSecret }}
+{{- else }}
+{{- printf "%s-secret" (include "hindsight.fullname" .) }}
+{{- end }}
 {{- end }}

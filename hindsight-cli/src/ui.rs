@@ -172,8 +172,21 @@ pub fn print_think_response(response: &ReflectResponse) {
     println!("{}", response.text);
     println!();
 
-    if !response.based_on.is_empty() {
-        println!("{}", dim(&format!("Based on {} memory units", response.based_on.len())));
+    if let Some(based_on) = &response.based_on {
+        let count = based_on.memories.len();
+        if count > 0 {
+            println!("{}", dim(&format!("Based on {} memory units", count)));
+        }
+    }
+
+    // Display structured output if present
+    if let Some(structured) = &response.structured_output {
+        println!();
+        println!("{}", gradient_text("─── Structured Output ───"));
+        println!();
+        if let Ok(json) = serde_json::to_string_pretty(structured) {
+            println!("{}", json);
+        }
     }
 }
 
@@ -312,10 +325,10 @@ pub fn print_disposition(profile: &BankProfileResponse) {
     println!("{} {}", dim("Name:"), gradient_start(&profile.name));
     println!();
 
-    // Print background if available
-    if !profile.background.is_empty() {
-        println!("{}", gradient_mid("Background:"));
-        for line in profile.background.lines() {
+    // Print mission if available
+    if !profile.mission.is_empty() {
+        println!("{}", gradient_mid("Mission:"));
+        for line in profile.mission.lines() {
             println!("{}", line);
         }
         println!();

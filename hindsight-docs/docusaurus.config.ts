@@ -2,6 +2,9 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
+const umamiUrl = process.env.UMAMI_URL;
+const umamiWebsiteId = process.env.UMAMI_WEBSITE_ID;
+
 // Announcement bar - supports HTML for links
 // Set to empty string '' to hide the bar
 const ANNOUNCEMENT_BAR = 'Hindsight is State-of-the-Art on Memory for AI Agents | <a href="https://arxiv.org/abs/2512.12818" target="_blank">Read the paper →</a>';
@@ -60,16 +63,62 @@ const config: Config = {
     },
   ],
 
+  scripts: [
+    ...(umamiUrl && umamiWebsiteId
+      ? [
+          {
+            src: `${umamiUrl}/script.js`,
+            async: true,
+            defer: true,
+            'data-website-id': umamiWebsiteId,
+          },
+        ]
+      : []),
+  ],
+
   presets: [
     [
       'classic',
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/vectorize-io/hindsight/tree/main/hindsight-docs/',
           routeBasePath: '/',
+          // Only show "next" version in development or when INCLUDE_CURRENT_VERSION=true
+          // In production, only show released versions from versions.json
+          onlyIncludeVersions: (() => {
+            const isDev = process.env.NODE_ENV === 'development' || process.env.INCLUDE_CURRENT_VERSION === 'true';
+            try {
+              const versions = require('./versions.json') as string[];
+              // In dev mode, explicitly include 'current' (Next) + all released versions
+              // In production, only show released versions
+              return isDev ? ['current', ...versions] : versions;
+            } catch {
+              return undefined; // No versions yet, show current
+            }
+          })(),
+          // Disable version badges on all versions
+          versions: (() => {
+            const config: Record<string, {badge: boolean}> = {
+              current: {badge: false},
+            };
+            try {
+              const versions = require('./versions.json') as string[];
+              versions.forEach((v: string) => {
+                config[v] = {badge: false};
+              });
+            } catch {
+              // No versions yet
+            }
+            return config;
+          })(),
         },
-        blog: false,
+        blog: {
+          showReadingTime: true,
+          blogTitle: 'Hindsight Blog',
+          blogDescription: 'Updates, insights, and deep dives into agent memory',
+          postsPerPage: 10,
+          blogSidebarCount: 0,
+        },
         theme: {
           customCss: './src/css/custom.css',
         },
@@ -81,7 +130,7 @@ const config: Config = {
         specs: [
           {
             id: 'hindsight-api',
-            spec: 'openapi.json',
+            spec: 'static/openapi.json',
             route: '/api-reference',
             url: '/openapi.json',
           },
@@ -123,7 +172,8 @@ const config: Config = {
       {
         hashed: true,
         docsRouteBasePath: '/',
-        indexBlog: false,
+        indexBlog: true,
+        blogRouteBasePath: '/blog',
         highlightSearchTermsOnTargetPage: false,
       },
     ],
@@ -153,7 +203,7 @@ const config: Config = {
       items: [
         {
           type: 'doc',
-          docId: 'developer/index',
+          docId: 'developer/installation',
           position: 'left',
           label: 'Developer',
           className: 'navbar-item-developer',
@@ -166,30 +216,51 @@ const config: Config = {
           className: 'navbar-item-sdks',
         },
         {
-          to: '/api-reference',
+          to: '/faq',
           position: 'left',
-          label: 'API Reference',
-          className: 'navbar-item-api',
+          label: 'FAQ',
+          className: 'navbar-item-faq',
         },
         {
-          type: 'doc',
-          docId: 'cookbook/index',
-          position: 'left',
-          label: 'Cookbook',
-          className: 'navbar-item-cookbook',
-        },
-        {
-          type: 'doc',
-          docId: 'changelog/index',
+          to: '/changelog',
           position: 'left',
           label: 'Changelog',
           className: 'navbar-item-changelog',
         },
         {
-          href: 'https://vectorize.io/hindsight/cloud',
+          type: 'dropdown',
+          label: 'Resources',
+          position: 'left',
+          className: 'navbar-item-resources',
+          items: [
+            {
+              to: '/cookbook',
+              label: 'Cookbook',
+            },
+            {
+              to: '/blog',
+              label: 'Blog',
+            },
+            {
+              to: '/api-reference',
+              label: 'API Reference',
+            },
+            {
+              href: 'https://join.slack.com/t/hindsight-space/shared_invite/zt-3nhbm4w29-LeSJ5Ixi6j8PdiYOCPlOgg',
+              label: 'Community',
+            },
+          ],
+        },
+        {
+          href: 'https://ui.hindsight.vectorize.io/signup',
           position: 'right',
-          label: 'Hindsight Cloud',
+          label: 'Cloud',
           className: 'navbar-item-cloud',
+        },
+        {
+          type: 'docsVersionDropdown',
+          position: 'right',
+          className: 'navbar-item-version',
         },
         {
           href: 'https://github.com/vectorize-io/hindsight',
@@ -210,6 +281,10 @@ const config: Config = {
               to: '/',
             },
             {
+              label: 'Developer Guide',
+              to: '/developer/installation',
+            },
+            {
               label: 'SDKs',
               to: '/sdks/python',
             },
@@ -220,16 +295,37 @@ const config: Config = {
           ],
         },
         {
-          title: 'More',
+          title: 'Resources',
+          items: [
+            {
+              label: 'Cookbook',
+              to: '/cookbook',
+            },
+            {
+              label: 'Changelog',
+              to: '/changelog',
+            },
+            {
+              label: 'Hindsight Cloud',
+              href: 'https://ui.hindsight.vectorize.io/signup',
+            },
+          ],
+        },
+        {
+          title: 'Community',
           items: [
             {
               label: 'GitHub',
               href: 'https://github.com/vectorize-io/hindsight',
             },
+            {
+              label: 'Slack',
+              href: 'https://join.slack.com/t/hindsight-space/shared_invite/zt-3nhbm4w29-LeSJ5Ixi6j8PdiYOCPlOgg',
+            },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Hindsight.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Vectorize, Inc.`,
     },
     prism: {
       theme: prismThemes.github,

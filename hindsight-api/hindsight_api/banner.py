@@ -4,6 +4,8 @@ Banner display for Hindsight API startup.
 Shows the logo and tagline with gradient colors.
 """
 
+from .utils import mask_network_location
+
 # Gradient colors: #0074d9 -> #009296
 GRADIENT_START = (0, 116, 217)  # #0074d9
 GRADIENT_END = (0, 146, 150)  # #009296
@@ -83,14 +85,21 @@ def print_startup_info(
     embeddings_provider: str,
     reranker_provider: str,
     mcp_enabled: bool = False,
+    version: str | None = None,
+    vector_extension: str | None = None,
+    text_search_extension: str | None = None,
 ):
     """Print styled startup information."""
     print(color_start("Starting Hindsight API..."))
+    if version:
+        print(f"  {dim('Version:')} {color(f'v{version}', 0.1)}")
     print(f"  {dim('URL:')} {color(f'http://{host}:{port}', 0.2)}")
-    print(f"  {dim('Database:')} {color(database_url, 0.4)}")
+    print(f"  {dim('Database:')} {color(mask_network_location(database_url), 0.4)}")
     print(f"  {dim('LLM:')} {color(f'{llm_provider} / {llm_model}', 0.6)}")
     print(f"  {dim('Embeddings:')} {color(embeddings_provider, 0.8)}")
     print(f"  {dim('Reranker:')} {color(reranker_provider, 1.0)}")
+    extensions = f"{vector_extension or 'default'} (vector) / {text_search_extension or 'default'} (text)"
+    print(f"  {dim('Extensions:')} {color(extensions, 0.4)}")
     if mcp_enabled:
         print(f"  {dim('MCP:')} {color_end('enabled at /mcp')}")
     print()

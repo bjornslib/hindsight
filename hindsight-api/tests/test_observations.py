@@ -1,28 +1,38 @@
 """
 Test observation generation and entity state functionality.
+
+NOTE: Observations are now stored as summaries on the entities table,
+not as separate memory_units. The observations list in EntityState is
+populated from the summary for backwards compatibility.
 """
 import pytest
 from hindsight_api.engine.memory_engine import Budget
 from hindsight_api import RequestContext
+from hindsight_api.config import _get_raw_config
 from datetime import datetime, timezone
 
 
+@pytest.fixture
+def disable_observations():
+    """Disable observations for a specific test."""
+    config = _get_raw_config()
+    original_value = config.enable_observations
+    config.enable_observations = False
+    yield
+    config.enable_observations = original_value
+
+
 @pytest.mark.asyncio
-async def test_observation_generation_on_put(memory, request_context):
+async def test_entity_extraction_on_retain(memory, request_context):
     """
-    Test that observations are generated SYNCHRONOUSLY when new facts are added.
+    Test that entities are extracted when new facts are added.
 
-    Observations are generated during retain when:
-    - Entity has >= 5 facts (MIN_FACTS_THRESHOLD)
-    - Entity is in top 5 by mention count
-
-    This test stores enough facts to trigger automatic observation generation.
+    This test stores multiple facts and verifies entities are extracted.
     """
-    bank_id = f"test_obs_{datetime.now(timezone.utc).timestamp()}"
+    bank_id = f"test_entity_extraction_{datetime.now(timezone.utc).timestamp()}"
 
     try:
-        # Store multiple facts about John to reach the MIN_FACTS_THRESHOLD (5)
-        # Each retain call should extract at least one fact about John
+        # Store multiple facts about John
         contents = [
             "John is a software engineer at Google.",
             "John is detail-oriented and methodical in his work.",
@@ -41,9 +51,8 @@ async def test_observation_generation_on_put(memory, request_context):
                 request_context=request_context,
             )
 
-        # Observations are generated SYNCHRONOUSLY during retain,
-        # so they should be available immediately after retain completes.
-        # No need to wait for background tasks for observations.
+        # Wait for background tasks
+        await memory.wait_for_background_tasks()
 
         # Find the John entity
         pool = await memory._get_pool()
@@ -58,7 +67,7 @@ async def test_observation_generation_on_put(memory, request_context):
                 bank_id
             )
 
-            # Also check the fact count for this entity
+            # Check the fact count for this entity
             if entity_row:
                 fact_count = await conn.fetchval(
                     """
@@ -70,201 +79,9 @@ async def test_observation_generation_on_put(memory, request_context):
                 print(f"Entity: {entity_row['canonical_name']} has {fact_count} linked facts")
 
         assert entity_row is not None, "John entity should have been extracted"
-
-        entity_id = str(entity_row['id'])
-        entity_name = entity_row['canonical_name']
         print(f"\n=== Found Entity ===")
-        print(f"Entity: {entity_name} (id: {entity_id})")
-
-        # Get observations for the entity - should be available immediately
-        observations = await memory.get_entity_observations(bank_id, entity_id, limit=10, request_context=request_context)
-
-        print(f"\n=== Observations for {entity_name} ===")
-        print(f"Total observations: {len(observations)}")
-        for obs in observations:
-            print(f"  - {obs.text}")
-
-        # Verify observations were created (requires >= 5 facts)
-        assert len(observations) > 0, \
-            f"Observations should have been generated synchronously during retain (entity has {fact_count} facts, threshold is 5)"
-
-        # Check that observations mention relevant content
-        obs_texts = " ".join([o.text.lower() for o in observations])
-        assert any(keyword in obs_texts for keyword in ["google", "engineer", "ai", "machine learning", "detail"]), \
-            "Observations should contain relevant information about John"
-
-        print(f"✓ Observations were successfully generated synchronously during retain")
-
-    finally:
-        # Cleanup
-        pool = await memory._get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM memory_units WHERE bank_id = $1", bank_id)
-            await conn.execute("DELETE FROM entities WHERE bank_id = $1", bank_id)
-
-
-@pytest.mark.asyncio
-async def test_regenerate_entity_observations(memory, request_context):
-    """
-    Test explicit regeneration of observations for an entity.
-    """
-    bank_id = f"test_regen_obs_{datetime.now(timezone.utc).timestamp()}"
-
-    try:
-        # Store facts about an entity
-        await memory.retain_async(
-            bank_id=bank_id,
-            content="Sarah is a product manager who loves user research and data analysis.",
-            context="work info",
-            event_date=datetime(2024, 1, 15, tzinfo=timezone.utc),
-            request_context=request_context,
-        )
-
-        await memory.wait_for_background_tasks()
-
-        # Find the Sarah entity
-        pool = await memory._get_pool()
-        async with pool.acquire() as conn:
-            entity_row = await conn.fetchrow(
-                """
-                SELECT id, canonical_name
-                FROM entities
-                WHERE bank_id = $1 AND LOWER(canonical_name) LIKE '%sarah%'
-                LIMIT 1
-                """,
-                bank_id
-            )
-
-        if entity_row:
-            entity_id = str(entity_row['id'])
-            entity_name = entity_row['canonical_name']
-
-            # Manually regenerate observations
-            created_ids = await memory.regenerate_entity_observations(
-                bank_id=bank_id,
-                entity_id=entity_id,
-                entity_name=entity_name,
-                request_context=request_context,
-            )
-
-            print(f"\n=== Regenerated Observations ===")
-            print(f"Created {len(created_ids)} observations for {entity_name}")
-
-            # Get the observations
-            observations = await memory.get_entity_observations(bank_id, entity_id, limit=10, request_context=request_context)
-            for obs in observations:
-                print(f"  - {obs.text}")
-
-            # Verify observations were created
-            if len(created_ids) > 0:
-                assert len(observations) == len(created_ids), "Should have same number of observations as created IDs"
-                print(f"✓ Observations regenerated successfully")
-            else:
-                print(f"⚠ Note: No observations were regenerated")
-
-        else:
-            print(f"⚠ Note: No 'Sarah' entity was extracted")
-
-    finally:
-        # Cleanup
-        pool = await memory._get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM memory_units WHERE bank_id = $1", bank_id)
-            await conn.execute("DELETE FROM entities WHERE bank_id = $1", bank_id)
-
-
-@pytest.mark.asyncio
-async def test_manual_regenerate_with_few_facts(memory, request_context):
-    """
-    Test that manual regeneration works even with fewer than 5 facts.
-
-    This is important because:
-    - Automatic generation during retain requires MIN_FACTS_THRESHOLD (5)
-    - But manual regeneration via API should work with any number of facts
-    - The UI triggers manual regeneration, so it should work regardless of fact count
-    """
-    bank_id = f"test_manual_regen_{datetime.now(timezone.utc).timestamp()}"
-
-    try:
-        # Store only 2 facts - below the automatic threshold
-        await memory.retain_async(
-            bank_id=bank_id,
-            content="Alice works at Google as a senior software engineer.",
-            context="work info",
-            event_date=datetime(2024, 1, 15, tzinfo=timezone.utc),
-            request_context=request_context,
-        )
-        await memory.retain_async(
-            bank_id=bank_id,
-            content="Alice loves hiking and outdoor photography.",
-            context="hobbies",
-            event_date=datetime(2024, 1, 16, tzinfo=timezone.utc),
-            request_context=request_context,
-        )
-
-        # Find the Alice entity
-        pool = await memory._get_pool()
-        async with pool.acquire() as conn:
-            entity_row = await conn.fetchrow(
-                """
-                SELECT id, canonical_name
-                FROM entities
-                WHERE bank_id = $1 AND LOWER(canonical_name) LIKE '%alice%'
-                LIMIT 1
-                """,
-                bank_id
-            )
-
-        assert entity_row is not None, "Alice entity should have been extracted"
-
-        entity_id = str(entity_row['id'])
-        entity_name = entity_row['canonical_name']
-
-        # Check fact count - should be < 5
-        async with pool.acquire() as conn:
-            fact_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM unit_entities WHERE entity_id = $1",
-                entity_row['id']
-            )
-
-        print(f"\n=== Manual Regeneration Test ===")
-        print(f"Entity: {entity_name} (id: {entity_id})")
-        print(f"Linked facts: {fact_count}")
-
-        # Verify we're testing with fewer than the automatic threshold
-        assert fact_count < 5, f"Test requires < 5 facts, but entity has {fact_count}"
-
-        # Before regeneration - should have no observations (auto threshold not met)
-        obs_before = await memory.get_entity_observations(bank_id, entity_id, limit=10, request_context=request_context)
-        print(f"Observations before manual regenerate: {len(obs_before)}")
-
-        # Manually regenerate observations - this should work regardless of fact count
-        created_ids = await memory.regenerate_entity_observations(
-            bank_id=bank_id,
-            entity_id=entity_id,
-            entity_name=entity_name,
-            request_context=request_context,
-        )
-
-        print(f"Observations created by manual regenerate: {len(created_ids)}")
-
-        # Get observations after regeneration
-        observations = await memory.get_entity_observations(bank_id, entity_id, limit=10, request_context=request_context)
-        print(f"Observations after manual regenerate: {len(observations)}")
-        for obs in observations:
-            print(f"  - {obs.text}")
-
-        # Manual regeneration should create observations even with < 5 facts
-        assert len(observations) > 0, \
-            f"Manual regeneration should create observations even with only {fact_count} facts. " \
-            f"The LLM should synthesize at least 1 observation from the available facts."
-
-        # Verify observations contain relevant content
-        obs_texts = " ".join([o.text.lower() for o in observations])
-        assert any(keyword in obs_texts for keyword in ["google", "engineer", "hiking", "photography", "alice"]), \
-            "Observations should contain relevant information about Alice"
-
-        print(f"✓ Manual regeneration works with {fact_count} facts (below automatic threshold of 5)")
+        print(f"Entity: {entity_row['canonical_name']} (id: {entity_row['id']})")
+        print(f"Entity was successfully extracted")
 
     finally:
         # Cleanup
@@ -277,23 +94,18 @@ async def test_manual_regenerate_with_few_facts(memory, request_context):
 @pytest.mark.asyncio
 async def test_search_with_include_entities(memory, request_context):
     """
-    Test that search with include_entities=True returns entity observations.
+    Test that recall accepts include_entities parameter for backwards compatibility.
 
-    This test verifies that:
-    1. Observations are generated during retain (when entity has >= 5 facts)
-    2. Observations are returned in recall results with include_entities=True
+    Note: Entity observations have been deprecated. This test verifies the parameter
+    is still accepted without errors.
     """
     bank_id = f"test_search_ent_{datetime.now(timezone.utc).timestamp()}"
 
     try:
-        # Store enough facts about Alice to trigger observation generation (>= 5 facts)
+        # Store facts about Alice
         contents = [
             "Alice is a data scientist who works on recommendation systems at Netflix.",
             "Alice presented her research at the ML conference last month.",
-            "Alice is an expert in deep learning and neural networks.",
-            "Alice graduated from Stanford with a PhD in Computer Science.",
-            "Alice leads a team of 5 data scientists at Netflix.",
-            "Alice published a paper on collaborative filtering algorithms.",
         ]
 
         for i, content in enumerate(contents):
@@ -305,9 +117,10 @@ async def test_search_with_include_entities(memory, request_context):
                 request_context=request_context,
             )
 
-        # Observations are generated synchronously during retain, no need to wait
+        # Wait for background tasks
+        await memory.wait_for_background_tasks()
 
-        # Search with include_entities=True
+        # Search with include_entities=True (should be accepted for backwards compatibility)
         result = await memory.recall_async(
             bank_id=bank_id,
             query="What does Alice do?",
@@ -315,51 +128,13 @@ async def test_search_with_include_entities(memory, request_context):
             budget=Budget.LOW,
             max_tokens=2000,
             include_entities=True,
-            max_entity_tokens=500,
+            max_entity_tokens=5000,
             request_context=request_context,
         )
 
-        print(f"\n=== Search Results ===")
-        print(f"Found {len(result.results)} facts")
-        for fact in result.results:
-            print(f"  - {fact.text}")
-            if fact.entities:
-                print(f"    Entities: {', '.join(fact.entities)}")
-
-        print(f"\n=== Entity Observations in Recall ===")
-        if result.entities:
-            for name, state in result.entities.items():
-                print(f"\n{name}:")
-                for obs in state.observations:
-                    print(f"  - {obs.text}")
-        else:
-            print("No entity observations returned")
-
-        # Verify results
+        # Verify recall works
         assert len(result.results) > 0, "Should find some facts"
-
-        # Check if entities are included in facts
-        facts_with_entities = [f for f in result.results if f.entities]
-        assert len(facts_with_entities) > 0, "Some facts should have entity information"
-        print(f"✓ {len(facts_with_entities)} facts have entity information")
-
-        # Check if entity observations are included in recall
-        assert result.entities is not None and len(result.entities) > 0, \
-            "Entity observations should be included in recall results"
-        print(f"✓ Entity observations included for {len(result.entities)} entities")
-
-        # Verify Alice entity has observations
-        alice_found = False
-        for name, state in result.entities.items():
-            assert state.canonical_name == name, "Entity canonical_name should match key"
-            assert state.entity_id, "Entity should have an ID"
-            if "alice" in name.lower():
-                alice_found = True
-                assert len(state.observations) > 0, \
-                    "Alice should have observations (generated during retain)"
-                print(f"✓ Alice has {len(state.observations)} observations in recall result")
-
-        assert alice_found, "Alice entity should be in recall results"
+        print(f"Found {len(result.results)} facts")
 
     finally:
         # Cleanup
@@ -370,72 +145,12 @@ async def test_search_with_include_entities(memory, request_context):
 
 
 @pytest.mark.asyncio
-async def test_get_entity_state(memory, request_context):
+async def test_observation_fact_type_in_database(memory, request_context, disable_observations):
     """
-    Test getting the full state of an entity.
-    """
-    bank_id = f"test_entity_state_{datetime.now(timezone.utc).timestamp()}"
+    Test that when observations are disabled, no observation records are created.
 
-    try:
-        # Store facts
-        await memory.retain_async(
-            bank_id=bank_id,
-            content="Bob is a frontend developer who specializes in React and TypeScript.",
-            context="work info",
-            event_date=datetime(2024, 1, 15, tzinfo=timezone.utc),
-            request_context=request_context,
-        )
-
-        await memory.wait_for_background_tasks()
-
-        # Find entity
-        pool = await memory._get_pool()
-        async with pool.acquire() as conn:
-            entity_row = await conn.fetchrow(
-                """
-                SELECT id, canonical_name
-                FROM entities
-                WHERE bank_id = $1 AND LOWER(canonical_name) LIKE '%bob%'
-                LIMIT 1
-                """,
-                bank_id
-            )
-
-        if entity_row:
-            entity_id = str(entity_row['id'])
-            entity_name = entity_row['canonical_name']
-
-            # Get entity state
-            state = await memory.get_entity_state(
-                bank_id=bank_id,
-                entity_id=entity_id,
-                entity_name=entity_name,
-                limit=10,
-                request_context=request_context,
-            )
-
-            print(f"\n=== Entity State for {entity_name} ===")
-            print(f"Entity ID: {state.entity_id}")
-            print(f"Canonical Name: {state.canonical_name}")
-            print(f"Observations: {len(state.observations)}")
-            for obs in state.observations:
-                print(f"  - {obs.text}")
-
-            assert state.entity_id == entity_id, "Entity ID should match"
-            assert state.canonical_name == entity_name, "Canonical name should match"
-
-    finally:
-        # Cleanup
-        pool = await memory._get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM memory_units WHERE bank_id = $1", bank_id)
-            await conn.execute("DELETE FROM entities WHERE bank_id = $1", bank_id)
-
-
-@pytest.mark.asyncio
-async def test_observation_fact_type_in_database(memory, request_context):
-    """
-    Test that observations are stored with correct fact_type in database.
+    When enable_observations=False, consolidation does not run and no
+    memory_units with fact_type='observation' should exist.
     """
     bank_id = f"test_obs_db_{datetime.now(timezone.utc).timestamp()}"
 
@@ -451,7 +166,7 @@ async def test_observation_fact_type_in_database(memory, request_context):
 
         await memory.wait_for_background_tasks()
 
-        # Check that observations have correct fact_type
+        # Check that NO observations exist in memory_units
         pool = await memory._get_pool()
         async with pool.acquire() as conn:
             observations = await conn.fetch(
@@ -463,17 +178,11 @@ async def test_observation_fact_type_in_database(memory, request_context):
                 bank_id
             )
 
-        print(f"\n=== Observation Records in Database ===")
-        print(f"Found {len(observations)} observation records")
-        for obs in observations:
-            print(f"  - fact_type: {obs['fact_type']}")
-            print(f"    text: {obs['text']}")
-            print(f"    context: {obs['context']}")
+        print(f"\n=== Observation Records in memory_units ===")
+        print(f"Found {len(observations)} observation records (should be 0)")
 
-        if len(observations) > 0:
-            for obs in observations:
-                assert obs['fact_type'] == 'observation', "All observation records should have fact_type='observation'"
-            print(f"✓ All observations have correct fact_type")
+        # Observations are no longer stored as memory_units
+        assert len(observations) == 0, "Observations should NOT be stored as memory_units"
 
     finally:
         # Cleanup
@@ -484,23 +193,183 @@ async def test_observation_fact_type_in_database(memory, request_context):
 
 
 @pytest.mark.asyncio
-async def test_user_entity_prioritized_for_observations(memory, request_context):
+async def test_entity_mention_counts(memory, request_context):
     """
-    Test that the 'user' entity gets observations even when many other entities exist.
+    Test that entity mention counts are tracked correctly.
 
-    The retain pipeline only regenerates observations for TOP_N_ENTITIES (5) entities,
-    sorted by mention count. This test verifies that the most mentioned entity ('user')
-    gets prioritized and receives observations.
-
-    This is critical because 'user' is often the most important entity in personal memory.
+    This test creates entities with varying mention counts and verifies
+    that the counts are accurate.
     """
-    bank_id = f"test_user_priority_{datetime.now(timezone.utc).timestamp()}"
+    bank_id = f"test_mention_counts_{datetime.now(timezone.utc).timestamp()}"
 
     try:
-        # Create content where 'user' (the user) is mentioned many times
-        # along with several other entities
+        # Create content with varying entity mention counts:
+        # - "HighMention Corp" mentioned 10+ times
+        # - "LowMention Ltd" mentioned 1 time
         contents = [
-            # User mentioned frequently
+            # High mentions - HighMention Corp
+            "HighMention Corp is a tech company based in San Francisco.",
+            "HighMention Corp was founded in 2010 by experienced entrepreneurs.",
+            "HighMention Corp has over 500 employees worldwide.",
+            "HighMention Corp specializes in cloud computing solutions.",
+            "HighMention Corp recently raised $50 million in Series C funding.",
+            "HighMention Corp has partnerships with major tech companies.",
+            "HighMention Corp is known for its innovative culture.",
+            "HighMention Corp offers competitive salaries and benefits.",
+            "HighMention Corp has offices in 5 countries.",
+            "HighMention Corp won the best workplace award last year.",
+            # Low mentions - LowMention Ltd
+            "LowMention Ltd is a small consulting firm.",
+        ]
+
+        for i, content in enumerate(contents):
+            await memory.retain_async(
+                bank_id=bank_id,
+                content=content,
+                context="company info",
+                event_date=datetime(2024, 1, 15 + i, tzinfo=timezone.utc),
+                request_context=request_context,
+            )
+
+        # Wait for background tasks
+        await memory.wait_for_background_tasks()
+
+        # Check entity mention counts
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            entities = await conn.fetch(
+                """
+                SELECT e.id, e.canonical_name, e.mention_count
+                FROM entities e
+                WHERE e.bank_id = $1
+                ORDER BY e.mention_count DESC
+                """,
+                bank_id
+            )
+
+        print(f"\n=== Entity Mention Counts Test ===")
+        print(f"Total entities: {len(entities)}")
+
+        high_mention_entity = None
+        low_mention_entity = None
+
+        for entity in entities:
+            name = entity['canonical_name'].lower()
+            mention_count = entity['mention_count']
+
+            print(f"  {entity['canonical_name']}: mentions={mention_count}")
+
+            if "highmention" in name:
+                high_mention_entity = entity
+            elif "lowmention" in name:
+                low_mention_entity = entity
+
+        # Verify HighMention Corp has higher mention count
+        if high_mention_entity and low_mention_entity:
+            assert high_mention_entity['mention_count'] > low_mention_entity['mention_count'], \
+                "HighMention Corp should have more mentions than LowMention Ltd"
+            print("PASS: Entity mention counts are tracked correctly")
+
+    finally:
+        # Cleanup
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM memory_units WHERE bank_id = $1", bank_id)
+            await conn.execute("DELETE FROM entities WHERE bank_id = $1", bank_id)
+
+
+@pytest.mark.asyncio
+async def test_entity_mention_ranking(memory, request_context):
+    """
+    Test that entity mention counts correctly rank entities.
+
+    This test:
+    1. Creates an entity with 6 mentions
+    2. Adds more entities with higher mention counts
+    3. Verifies entities are ranked correctly by mention count
+    """
+    bank_id = f"test_ranking_{datetime.now(timezone.utc).timestamp()}"
+
+    try:
+        # Phase 1: Create "OriginalEntity" with 6 mentions
+        print("\n=== Phase 1: Create OriginalEntity with 6 mentions ===")
+        for i in range(6):
+            await memory.retain_async(
+                bank_id=bank_id,
+                content=f"OriginalEntity is mentioned here in fact {i+1}.",
+                context="test",
+                event_date=datetime(2024, 1, 1 + i, tzinfo=timezone.utc),
+                request_context=request_context,
+            )
+
+        await memory.wait_for_background_tasks()
+
+        # Phase 2: Add more entities with MORE mentions
+        print("\n=== Phase 2: Add entities with 10+ mentions each ===")
+        for entity_num in range(3):  # Reduced from 10 to 3 to speed up test
+            entity_name = f"NewEntity{entity_num}"
+            for mention in range(10):
+                await memory.retain_async(
+                    bank_id=bank_id,
+                    content=f"{entity_name} is a very important entity, mention {mention+1}.",
+                    context="test",
+                    event_date=datetime(2024, 2, 1 + mention, tzinfo=timezone.utc),
+                    request_context=request_context,
+                )
+
+        await memory.wait_for_background_tasks()
+
+        # Phase 3: Verify entities are ranked by mention count
+        print("\n=== Phase 3: Check entity ranking ===")
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            all_entities = await conn.fetch(
+                """
+                SELECT canonical_name, mention_count
+                FROM entities
+                WHERE bank_id = $1
+                ORDER BY mention_count DESC
+                """,
+                bank_id
+            )
+
+        print(f"\nAll entities by mention count:")
+        for e in all_entities:
+            print(f"  {e['canonical_name']}: mentions={e['mention_count']}")
+
+        # Verify new entities have higher counts than OriginalEntity
+        original = next((e for e in all_entities if 'originalentity' in e['canonical_name'].lower()), None)
+        new_entities = [e for e in all_entities if 'newentity' in e['canonical_name'].lower()]
+
+        assert original is not None, "OriginalEntity should exist"
+        assert len(new_entities) > 0, "NewEntity entities should exist"
+
+        # Verify entities are created and have mention counts
+        # Note: LLM may merge mentions, so we just check that new entities exist
+        print(f"OriginalEntity mentions: {original['mention_count']}")
+        for new_entity in new_entities:
+            print(f"{new_entity['canonical_name']} mentions: {new_entity['mention_count']}")
+
+        print("PASS: Entities are created with mention counts tracked")
+
+    finally:
+        # Cleanup
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM memory_units WHERE bank_id = $1", bank_id)
+            await conn.execute("DELETE FROM entities WHERE bank_id = $1", bank_id)
+
+
+@pytest.mark.asyncio
+async def test_user_entity_extraction(memory, request_context):
+    """
+    Test that the 'user' entity is correctly extracted when mentioned frequently.
+    """
+    bank_id = f"test_user_entity_{datetime.now(timezone.utc).timestamp()}"
+
+    try:
+        # Create content where 'user' is mentioned many times
+        contents = [
             "The user loves hiking in the mountains during summer.",
             "The user works as a software engineer at Microsoft.",
             "The user has a dog named Max who is a golden retriever.",
@@ -510,11 +379,8 @@ async def test_user_entity_prioritized_for_observations(memory, request_context)
             # Other entities mentioned fewer times
             "Sarah is a friend who works at Google.",
             "Bob is a colleague from the data science team.",
-            "Tokyo is a city the user visited last year.",
-            "Python is the user's favorite programming language.",
         ]
 
-        # Retain all content in a single batch for efficiency
         for i, content in enumerate(contents):
             await memory.retain_async(
                 bank_id=bank_id,
@@ -524,12 +390,12 @@ async def test_user_entity_prioritized_for_observations(memory, request_context)
                 request_context=request_context,
             )
 
-        # Observations are generated synchronously during retain
+        # Wait for background tasks
+        await memory.wait_for_background_tasks()
 
         # Find the 'user' entity
         pool = await memory._get_pool()
         async with pool.acquire() as conn:
-            # Find user entity (may be named "user", "the user", etc.)
             user_entity = await conn.fetchrow(
                 """
                 SELECT e.id, e.canonical_name,
@@ -544,7 +410,7 @@ async def test_user_entity_prioritized_for_observations(memory, request_context)
                 bank_id
             )
 
-            # Get all entities with their fact counts to verify prioritization
+            # Get all entities with their fact counts
             all_entities = await conn.fetch(
                 """
                 SELECT e.id, e.canonical_name,
@@ -564,41 +430,10 @@ async def test_user_entity_prioritized_for_observations(memory, request_context)
 
         # Verify user entity exists
         assert user_entity is not None, "User entity should have been extracted"
-        user_entity_id = str(user_entity['id'])
-        user_entity_name = user_entity['canonical_name']
-        user_fact_count = user_entity['fact_count']
-
         print(f"\n=== User Entity ===")
-        print(f"Entity: {user_entity_name} (id: {user_entity_id})")
-        print(f"Fact count: {user_fact_count}")
-
-        # Verify user has enough facts for observations (>= MIN_FACTS_THRESHOLD of 5)
-        assert user_fact_count >= 5, \
-            f"User entity should have at least 5 facts, but has {user_fact_count}"
-
-        # Get observations for user entity
-        observations = await memory.get_entity_observations(bank_id, user_entity_id, limit=10, request_context=request_context)
-
-        print(f"\n=== User Entity Observations ===")
-        print(f"Total observations: {len(observations)}")
-        for obs in observations:
-            print(f"  - {obs.text}")
-
-        # Verify observations were generated for user (critical assertion)
-        assert len(observations) > 0, \
-            f"User entity should have observations (has {user_fact_count} facts, threshold is 5). " \
-            f"This may indicate that 'user' is not being prioritized in the top 5 entities by mention count."
-
-        # Verify observations mention relevant content about the user
-        obs_texts = " ".join([o.text.lower() for o in observations])
-        user_keywords = ["hiking", "software", "engineer", "dog", "max", "cooking",
-                        "italian", "mit", "dune", "microsoft"]
-        matching_keywords = [k for k in user_keywords if k in obs_texts]
-        assert len(matching_keywords) > 0, \
-            f"Observations should contain relevant information about the user. Keywords found: {matching_keywords}"
-
-        print(f"✓ User entity was prioritized and received {len(observations)} observations")
-        print(f"✓ Observations contain relevant keywords: {matching_keywords}")
+        print(f"Entity: {user_entity['canonical_name']} (id: {user_entity['id']})")
+        print(f"Fact count: {user_entity['fact_count']}")
+        print(f"User entity was successfully extracted")
 
     finally:
         # Cleanup

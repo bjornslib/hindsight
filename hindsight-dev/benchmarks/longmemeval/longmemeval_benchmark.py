@@ -16,7 +16,12 @@ import pydantic
 from hindsight_api.engine.llm_wrapper import LLMConfig
 from openai import AsyncOpenAI
 
-from benchmarks.common.benchmark_runner import BenchmarkDataset, BenchmarkRunner, LLMAnswerEvaluator, LLMAnswerGenerator
+from benchmarks.common.benchmark_runner import (
+    BenchmarkDataset,
+    BenchmarkRunner,
+    LLMAnswerEvaluator,
+    LLMAnswerGenerator,
+)
 
 
 class LongMemEvalDataset(BenchmarkDataset):
@@ -332,6 +337,7 @@ The context contains memory facts extracted from previous conversations, each wi
         recall_result: Dict[str, Any],
         question_date: Optional[datetime] = None,
         question_type: Optional[str] = None,
+        bank_id: Optional[str] = None,
     ) -> Tuple[str, str, Optional[List[Dict[str, Any]]]]:
         """
         Generate answer from retrieved memories using Groq.
@@ -607,16 +613,20 @@ async def run_benchmark(
         else:
             console.print(f"[green]Found {total_found} {filter_type} items to re-evaluate[/green]")
 
-    answer_generator = LongMemEvalAnswerGenerator(context_format=context_format)
-    answer_evaluator = LLMAnswerEvaluator()
-
-    # Log context format being used
-    console.print(f"[blue]Context format: {context_format}[/blue]")
-
     # Create local memory engine
+    from hindsight_api.engine.memory_engine import Budget
+    from hindsight_api.models import RequestContext
+
     from benchmarks.common.benchmark_runner import create_memory_engine
 
     memory = await create_memory_engine()
+
+    # Create answer generator
+    answer_generator = LongMemEvalAnswerGenerator(context_format=context_format)
+    # Log context format being used
+    console.print(f"[blue]Context format: {context_format}[/blue]")
+
+    answer_evaluator = LLMAnswerEvaluator()
 
     # Filter by only_ingested: only run items whose memory bank already exists
     if only_ingested:
@@ -684,6 +694,11 @@ async def run_benchmark(
         or max_instances_per_category is not None
     )
 
+    # Configuration for single-phase benchmark
+    separate_ingestion = False
+    clear_per_item = True  # Use unique agent_id per question
+    concurrent_questions = 8
+
     results = await runner.run(
         dataset_path=dataset_path,
         agent_id="longmemeval",  # Will be suffixed with question_id per item
@@ -694,10 +709,10 @@ async def run_benchmark(
         thinking_budget=thinking_budget,
         max_tokens=max_tokens,
         skip_ingestion=skip_ingestion or only_ingested,  # Auto-skip ingestion when using --only-ingested
-        max_concurrent_questions=8,
+        max_concurrent_questions=concurrent_questions,
         eval_semaphore_size=8,
-        separate_ingestion_phase=False,  # Process each question independently
-        clear_agent_per_item=True,  # Use unique agent_id per question
+        separate_ingestion_phase=separate_ingestion,
+        clear_agent_per_item=clear_per_item,
         filln=filln,  # Only process questions without indexed data
         specific_item=question_id,  # Optional filter for specific question ID
         max_concurrent_items=max_concurrent_items,  # Parallel instance processing

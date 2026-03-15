@@ -26,7 +26,10 @@ def llm_config():
     api_key = os.getenv("HINDSIGHT_LLM_API_KEY", "")
     model = os.getenv("HINDSIGHT_LLM_MODEL", "openai/gpt-oss-120b")
 
-    if not api_key:
+    # vertexai uses GCP service account credentials (HINDSIGHT_API_LLM_VERTEXAI_*),
+    # not a traditional API key
+    providers_without_api_key = ("vertexai", "ollama")
+    if not api_key and provider not in providers_without_api_key:
         raise Exception("LLM API key not configured. Set HINDSIGHT_LLM_API_KEY environment variable.")
 
     return {
@@ -75,10 +78,9 @@ def test_server_context_manager_basic_workflow(client):
     bank_response = client.create_bank(
         bank_id=bank_id,
         name="Test Assistant",
-        background="An AI assistant that helps with programming and data analysis tasks."
+        mission="An AI assistant that helps with programming and data analysis tasks."
     )
-    assert "bank_id" in bank_response
-    assert bank_response["bank_id"] == bank_id
+    assert bank_response.bank_id == bank_id
 
     # Step 2: Store some memories about user preferences
     print("\n2. Storing memories...")
@@ -89,7 +91,7 @@ def test_server_context_manager_basic_workflow(client):
         content="User prefers Python over JavaScript for data analysis projects.",
         context="User conversation about programming languages"
     )
-    assert retain_response1.get("success") is True
+    assert retain_response1.success is True
 
     # Store second memory
     retain_response2 = client.retain(
@@ -97,7 +99,7 @@ def test_server_context_manager_basic_workflow(client):
         content="User is working on a machine learning project using scikit-learn.",
         context="Discussion about ML frameworks"
     )
-    assert retain_response2.get("success") is True
+    assert retain_response2.success is True
 
     # Store third memory
     retain_response3 = client.retain(
@@ -105,7 +107,7 @@ def test_server_context_manager_basic_workflow(client):
         content="User likes visualizing data with matplotlib and seaborn.",
         context="Conversation about data visualization"
     )
-    assert retain_response3.get("success") is True
+    assert retain_response3.success is True
 
     # Store batch memories
     batch_response = client.retain_batch(
@@ -116,7 +118,7 @@ def test_server_context_manager_basic_workflow(client):
         ]
     )
     # Check if the batch was submitted successfully (items_count shows how many were submitted)
-    assert batch_response.get("items_count", 0) >= 2
+    assert batch_response.items_count >= 2
 
     # Step 3: Recall memories based on a query
     print("\n3. Recalling memories about programming preferences...")
@@ -127,14 +129,13 @@ def test_server_context_manager_basic_workflow(client):
     )
 
     # Verify recall results
-    assert isinstance(recall_results, list)
-    assert len(recall_results) > 0
-    print(f"   Found {len(recall_results)} relevant memories")
+    assert isinstance(recall_results.results, list)
+    assert len(recall_results.results) > 0
+    print(f"   Found {len(recall_results.results)} relevant memories")
 
     # Check that results have expected structure
-    for result in recall_results:
-        assert "content" in result or "text" in result
-        print(f"   - {result.get('content') or result.get('text', '')[:100]}")
+    for result in recall_results.results:
+        print(f"   - {result.text[:100]}")
 
     # Step 4: Recall memories about machine learning
     print("\n4. Recalling memories about machine learning...")
@@ -145,11 +146,11 @@ def test_server_context_manager_basic_workflow(client):
     )
 
     # Verify recall results
-    assert isinstance(ml_recall_results, list)
-    assert len(ml_recall_results) > 0
-    print(f"   Found {len(ml_recall_results)} ML-related memories")
-    for result in ml_recall_results[:3]:  # Show first 3
-        print(f"   - {result.get('content') or result.get('text', '')[:100]}")
+    assert isinstance(ml_recall_results.results, list)
+    assert len(ml_recall_results.results) > 0
+    print(f"   Found {len(ml_recall_results.results)} ML-related memories")
+    for result in ml_recall_results.results[:3]:  # Show first 3
+        print(f"   - {result.text[:100]}")
 
     # Step 5: Reflect (generate contextual answer based on memories)
     print("\n5. Reflecting on query about recommendations...")
@@ -160,10 +161,7 @@ def test_server_context_manager_basic_workflow(client):
     )
 
     # Verify reflection response
-    assert isinstance(reflect_response, dict)
-    assert "answer" in reflect_response or "text" in reflect_response
-
-    answer = reflect_response.get("answer") or reflect_response.get("text", "")
+    answer = reflect_response.text
     assert len(answer) > 0
     print(f"   Answer: {answer[:200]}...")
 
@@ -180,8 +178,7 @@ def test_server_context_manager_basic_workflow(client):
         context="The user is starting a new deep learning project"
     )
 
-    assert isinstance(reflect_with_context, dict)
-    context_answer = reflect_with_context.get("answer") or reflect_with_context.get("text", "")
+    context_answer = reflect_with_context.text
     assert len(context_answer) > 0
     print(f"   Context-aware answer: {context_answer[:150]}...")
 
@@ -200,21 +197,21 @@ def test_server_manual_start_stop(client):
         bank_id=bank_id,
         name="Manual Test"
     )
-    assert bank_response["bank_id"] == bank_id
+    assert bank_response.bank_id == bank_id
 
     # Store a memory
     retain_response = client.retain(
         bank_id=bank_id,
         content="Testing manual server lifecycle."
     )
-    assert retain_response.get("success") is True
+    assert retain_response.success is True
 
     # Recall the memory
     recall_results = client.recall(
         bank_id=bank_id,
         query="server testing"
     )
-    assert len(recall_results) >= 0  # May or may not find results immediately
+    assert len(recall_results.results) >= 0  # May or may not find results immediately
 
 
 def test_server_with_client_context_manager(client):
@@ -233,11 +230,11 @@ def test_server_with_client_context_manager(client):
         bank_id=bank_id,
         content="Testing nested context managers."
     )
-    assert response.get("success") is True
+    assert response.success is True
 
     # Verify we can recall
     results = client.recall(bank_id=bank_id, query="context")
-    assert isinstance(results, list)
+    assert isinstance(results.results, list)
 
 
 def test_list_banks(client, shared_server):
@@ -252,21 +249,11 @@ def test_list_banks(client, shared_server):
     bank1_id = f"test_bank_1_{test_suffix}"
     bank2_id = f"test_bank_2_{test_suffix}"
 
-    client.create_bank(bank_id=bank1_id, name="Test Bank 1", background="First test bank")
-    client.create_bank(bank_id=bank2_id, name="Test Bank 2", background="Second test bank")
+    client.create_bank(bank_id=bank1_id, name="Test Bank 1", mission="First test bank")
+    client.create_bank(bank_id=bank2_id, name="Test Bank 2", mission="Second test bank")
 
-    # List all banks using the generated client
-    import hindsight_client_api
-    from hindsight_client_api.api import default_api
-
-    config = hindsight_client_api.Configuration(host=shared_server.url)
-    api_client = hindsight_client_api.ApiClient(config)
-    api = default_api.DefaultApi(api_client)
-
-    # Call list_banks endpoint
-    import asyncio
-    loop = asyncio.get_event_loop()
-    response = loop.run_until_complete(api.list_banks())
+    # List all banks using the namespace API
+    response = client.banks.list()
 
     # Verify response structure
     assert hasattr(response, 'banks'), "Response should have 'banks' attribute"
@@ -274,9 +261,8 @@ def test_list_banks(client, shared_server):
 
     # Verify each bank has bank_id (not agent_id)
     for bank in response.banks:
-        bank_dict = bank.to_dict() if hasattr(bank, 'to_dict') else bank
-        assert 'bank_id' in bank_dict, f"Bank should have 'bank_id' field, got: {bank_dict.keys()}"
-        assert 'agent_id' not in bank_dict, f"Bank should NOT have 'agent_id' field, got: {bank_dict.keys()}"
+        assert hasattr(bank, 'bank_id'), f"Bank should have 'bank_id' attribute"
+        assert bank.bank_id is not None, "Bank ID should not be None"
 
     # Find our test banks
     bank_ids = [b.bank_id if hasattr(b, 'bank_id') else b['bank_id'] for b in response.banks]
@@ -284,6 +270,3 @@ def test_list_banks(client, shared_server):
     assert bank2_id in bank_ids, f"Should find {bank2_id} in bank list"
 
     print(f"✓ Successfully listed {len(response.banks)} banks with correct bank_id field")
-
-    # Cleanup
-    loop.run_until_complete(api_client.close())

@@ -67,7 +67,7 @@ run_test_output() {
 cleanup() {
     echo ""
     echo "Cleaning up test bank..."
-    "$HINDSIGHT_CLI" bank delete "$TEST_BANK" 2>/dev/null || true
+    "$HINDSIGHT_CLI" bank delete "$TEST_BANK" -y 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -115,8 +115,11 @@ run_test "list documents" "$HINDSIGHT_CLI" document list "$TEST_BANK" || FAILED=
 # Test 14: Clear memories
 run_test "clear memories" "$HINDSIGHT_CLI" memory clear "$TEST_BANK" || FAILED=1
 
-# Test 15: Delete bank
-run_test "delete bank" "$HINDSIGHT_CLI" bank delete "$TEST_BANK" || FAILED=1
+# Test 15: List operations
+run_test "list operations" "$HINDSIGHT_CLI" operation list "$TEST_BANK" || FAILED=1
+
+# Test 16: Delete bank
+run_test "delete bank" "$HINDSIGHT_CLI" bank delete "$TEST_BANK" -y || FAILED=1
 
 echo ""
 if [ $FAILED -eq 0 ]; then

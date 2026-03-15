@@ -18,8 +18,10 @@ from ...config import get_config
 from ..db_utils import acquire_with_retry
 from ..memory_engine import fq_table
 from .graph_retrieval import BFSGraphRetriever, GraphRetriever
+from .link_expansion_retrieval import LinkExpansionRetriever
 from .mpfp_retrieval import MPFPGraphRetriever
-from .types import RetrievalResult
+from .tags import TagsMatch, build_tags_where_clause_simple
+from .types import MPFPTimings, RetrievalResult
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,20 @@ class ParallelRetrievalResult:
     temporal: list[RetrievalResult] | None
     timings: dict[str, float] = field(default_factory=dict)
     temporal_constraint: tuple | None = None  # (start_date, end_date)
+    mpfp_timings: list[MPFPTimings] = field(default_factory=list)  # MPFP sub-step timings per fact type
+    max_conn_wait: float = 0.0  # Maximum connection acquisition wait time across all methods
+
+
+@dataclass
+class MultiFactTypeRetrievalResult:
+    """Result from retrieval across all fact types."""
+
+    # Results per fact type
+    results_by_fact_type: dict[str, ParallelRetrievalResult]
+    # Aggregate timings
+    timings: dict[str, float] = field(default_factory=dict)
+    # Max connection wait across all operations
+    max_conn_wait: float = 0.0
 
 
 # Default graph retriever instance (can be overridden)
@@ -48,13 +64,18 @@ def get_default_graph_retriever() -> GraphRetriever:
         retriever_type = config.graph_retriever.lower()
         if retriever_type == "mpfp":
             _default_graph_retriever = MPFPGraphRetriever()
-            logger.info("Using MPFP graph retriever")
+            logger.info(
+                f"Using MPFP graph retriever (top_k_neighbors={_default_graph_retriever.config.top_k_neighbors})"
+            )
         elif retriever_type == "bfs":
             _default_graph_retriever = BFSGraphRetriever()
             logger.info("Using BFS graph retriever")
+        elif retriever_type == "link_expansion":
+            _default_graph_retriever = LinkExpansionRetriever()
+            logger.info("Using LinkExpansion graph retriever")
         else:
-            logger.warning(f"Unknown graph retriever '{retriever_type}', falling back to MPFP")
-            _default_graph_retriever = MPFPGraphRetriever()
+            logger.warning(f"Unknown graph retriever '{retriever_type}', falling back to link_expansion")
+            _default_graph_retriever = LinkExpansionRetriever()
     return _default_graph_retriever
 
 
@@ -64,234 +85,371 @@ def set_default_graph_retriever(retriever: GraphRetriever) -> None:
     _default_graph_retriever = retriever
 
 
-async def retrieve_semantic(
-    conn, query_emb_str: str, bank_id: str, fact_type: str, limit: int
-) -> list[RetrievalResult]:
+async def retrieve_semantic_bm25_combined(
+    conn,
+    query_emb_str: str,
+    query_text: str,
+    bank_id: str,
+    fact_types: list[str],
+    limit: int,
+    tags: list[str] | None = None,
+    tags_match: TagsMatch = "any",
+) -> dict[str, tuple[list[RetrievalResult], list[RetrievalResult]]]:
     """
-    Semantic retrieval via vector similarity.
+    Combined semantic + BM25 retrieval for multiple fact types in a single query.
+
+    Uses CTEs with window functions to get top-N results per fact type per method,
+    all in one database round-trip.
 
     Args:
         conn: Database connection
         query_emb_str: Query embedding as string
-        agent_id: bank ID
-        fact_type: Fact type to filter
-        limit: Maximum results to return
+        query_text: Query text for BM25
+        bank_id: Bank ID
+        fact_types: List of fact types to retrieve
+        limit: Maximum results per method per fact type
 
     Returns:
-        List of RetrievalResult objects
-    """
-    results = await conn.fetch(
-        f"""
-        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, access_count, embedding, fact_type, document_id, chunk_id,
-               1 - (embedding <=> $1::vector) AS similarity
-        FROM {fq_table("memory_units")}
-        WHERE bank_id = $2
-          AND embedding IS NOT NULL
-          AND fact_type = $3
-          AND (1 - (embedding <=> $1::vector)) >= 0.3
-        ORDER BY embedding <=> $1::vector
-        LIMIT $4
-        """,
-        query_emb_str,
-        bank_id,
-        fact_type,
-        limit,
-    )
-    return [RetrievalResult.from_db_row(dict(r)) for r in results]
-
-
-async def retrieve_bm25(conn, query_text: str, bank_id: str, fact_type: str, limit: int) -> list[RetrievalResult]:
-    """
-    BM25 keyword retrieval via full-text search.
-
-    Args:
-        conn: Database connection
-        query_text: Query text
-        agent_id: bank ID
-        fact_type: Fact type to filter
-        limit: Maximum results to return
-
-    Returns:
-        List of RetrievalResult objects
+        Dict mapping fact_type -> (semantic_results, bm25_results)
     """
     import re
 
-    # Sanitize query text: remove special characters that have meaning in tsquery
-    # Keep only alphanumeric characters and spaces
+    # Sanitize query text for BM25 (same as retrieve_bm25)
     sanitized_text = re.sub(r"[^\w\s]", " ", query_text.lower())
-
-    # Split and filter empty strings
     tokens = [token for token in sanitized_text.split() if token]
 
+    # If no valid tokens for BM25, just run semantic
     if not tokens:
-        # If no valid tokens, return empty results
-        return []
+        tags_clause = build_tags_where_clause_simple(tags, 5, match=tags_match)
+        params = [query_emb_str, bank_id, fact_types, limit]
+        if tags:
+            params.append(tags)
+        results = await conn.fetch(
+            f"""
+            WITH semantic_ranked AS (
+                SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags,
+                       1 - (embedding <=> $1::vector) AS similarity,
+                       NULL::float AS bm25_score,
+                       'semantic' AS source,
+                       ROW_NUMBER() OVER (PARTITION BY fact_type ORDER BY embedding <=> $1::vector) AS rn
+                FROM {fq_table("memory_units")}
+                WHERE bank_id = $2
+                  AND embedding IS NOT NULL
+                  AND fact_type = ANY($3)
+                  AND (1 - (embedding <=> $1::vector)) >= 0.3
+                  {tags_clause}
+            )
+            SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags,
+                   similarity, bm25_score, source
+            FROM semantic_ranked
+            WHERE rn <= $4
+            """,
+            *params,
+        )
+        # Group by fact_type
+        result_dict: dict[str, tuple[list[RetrievalResult], list[RetrievalResult]]] = {
+            ft: ([], []) for ft in fact_types
+        }
+        for r in results:
+            row = dict(r)
+            ft = row.get("fact_type")
+            row.pop("source", None)
+            if ft in result_dict:
+                result_dict[ft][0].append(RetrievalResult.from_db_row(row))
+        return result_dict
 
-    # Convert query to tsquery using OR for more flexible matching
-    # This prevents empty results when some terms are missing
-    query_tsquery = " | ".join(tokens)
+    # Build BM25 query based on text search backend
+    config = get_config()
 
-    results = await conn.fetch(
-        f"""
-        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, access_count, embedding, fact_type, document_id, chunk_id,
-               ts_rank_cd(search_vector, to_tsquery('english', $1)) AS bm25_score
-        FROM {fq_table("memory_units")}
-        WHERE bank_id = $2
-          AND fact_type = $3
-          AND search_vector @@ to_tsquery('english', $1)
-        ORDER BY bm25_score DESC
-        LIMIT $4
-        """,
-        query_tsquery,
-        bank_id,
-        fact_type,
-        limit,
-    )
-    return [RetrievalResult.from_db_row(dict(r)) for r in results]
+    # Build tags clause - param 6 if tags provided
+    tags_clause = build_tags_where_clause_simple(tags, 6, match=tags_match)
+
+    # Build backend-specific BM25 parts
+    if config.text_search_extension == "vchord":
+        # VectorChord BM25: use <&> operator with to_bm25query and tokenize
+        # Note: VectorChord scores are negative (higher = better, so -1 > -10)
+        bm25_score_expr = "search_vector <&> to_bm25query('idx_memory_units_text_search', tokenize($5, 'llmlingua2'))"
+        bm25_order_by = f"{bm25_score_expr} DESC"
+        bm25_where_filter = ""  # No additional WHERE filter for vchord
+        params = [query_emb_str, bank_id, fact_types, limit, query_text]  # Pass raw query_text for tokenization
+    elif config.text_search_extension == "pg_textsearch":
+        # Timescale pg_textsearch: use <@> operator with to_bm25query
+        # Note: pg_textsearch scores are negative (lower/more negative = better, so -10 > -1)
+        # We negate the score to maintain API consistency (higher = better)
+        bm25_score_expr = "-(text <@> to_bm25query($5, 'idx_memory_units_text_search'))"
+        bm25_order_by = "text <@> to_bm25query($5, 'idx_memory_units_text_search') ASC"
+        bm25_where_filter = ""  # No additional WHERE filter for pg_textsearch
+        params = [query_emb_str, bank_id, fact_types, limit, query_text]
+    else:  # native
+        # Native PostgreSQL: use ts_rank_cd with to_tsquery
+        query_tsquery = " | ".join(tokens)
+        bm25_score_expr = "ts_rank_cd(search_vector, to_tsquery('english', $5))"
+        bm25_order_by = f"{bm25_score_expr} DESC"
+        bm25_where_filter = "AND search_vector @@ to_tsquery('english', $5)"
+        params = [query_emb_str, bank_id, fact_types, limit, query_tsquery]
+
+    if tags:
+        params.append(tags)
+
+    # Single query template with backend-specific parts injected
+    query = f"""
+        WITH semantic_ranked AS (
+            SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags,
+                   1 - (embedding <=> $1::vector) AS similarity,
+                   NULL::float AS bm25_score,
+                   'semantic' AS source,
+                   ROW_NUMBER() OVER (PARTITION BY fact_type ORDER BY embedding <=> $1::vector) AS rn
+            FROM {fq_table("memory_units")}
+            WHERE bank_id = $2
+              AND embedding IS NOT NULL
+              AND fact_type = ANY($3)
+              AND (1 - (embedding <=> $1::vector)) >= 0.3
+              {tags_clause}
+        ),
+        bm25_ranked AS (
+            SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags,
+                   NULL::float AS similarity,
+                   {bm25_score_expr} AS bm25_score,
+                   'bm25' AS source,
+                   ROW_NUMBER() OVER (PARTITION BY fact_type ORDER BY {bm25_order_by}) AS rn
+            FROM {fq_table("memory_units")}
+            WHERE bank_id = $2
+              AND fact_type = ANY($3)
+              {bm25_where_filter}
+              {tags_clause}
+        ),
+        semantic AS (
+            SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags,
+                   similarity, bm25_score, source
+            FROM semantic_ranked WHERE rn <= $4
+        ),
+        bm25 AS (
+            SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags,
+                   similarity, bm25_score, source
+            FROM bm25_ranked WHERE rn <= $4
+        )
+        SELECT * FROM semantic
+        UNION ALL
+        SELECT * FROM bm25
+    """
+
+    # Combined CTE query for both semantic and BM25 across all fact types
+    # Uses window functions to limit per fact_type per method
+    results = await conn.fetch(query, *params)
+
+    # Group results by fact_type and source
+    result_dict: dict[str, tuple[list[RetrievalResult], list[RetrievalResult]]] = {ft: ([], []) for ft in fact_types}
+    for r in results:
+        row = dict(r)
+        source = row.pop("source", None)
+        ft = row.get("fact_type")
+        if ft in result_dict:
+            if source == "semantic":
+                result_dict[ft][0].append(RetrievalResult.from_db_row(row))
+            else:
+                result_dict[ft][1].append(RetrievalResult.from_db_row(row))
+
+    return result_dict
 
 
-async def retrieve_temporal(
+async def retrieve_temporal_combined(
     conn,
     query_emb_str: str,
     bank_id: str,
-    fact_type: str,
+    fact_types: list[str],
     start_date: datetime,
     end_date: datetime,
     budget: int,
     semantic_threshold: float = 0.1,
-) -> list[RetrievalResult]:
+    tags: list[str] | None = None,
+    tags_match: TagsMatch = "any",
+) -> dict[str, list[RetrievalResult]]:
     """
-    Temporal retrieval with spreading activation.
+    Temporal retrieval for multiple fact types in a single query.
 
-    Strategy:
-    1. Find entry points (facts in date range with semantic relevance)
-    2. Spread through temporal links to related facts
-    3. Score by temporal proximity + semantic similarity + link weight
+    Batches the entry point query using window functions to get top-N per fact type,
+    then runs spreading for each fact type.
 
     Args:
         conn: Database connection
         query_emb_str: Query embedding as string
-        agent_id: bank ID
-        fact_type: Fact type to filter
+        bank_id: Bank ID
+        fact_types: List of fact types to retrieve
         start_date: Start of time range
         end_date: End of time range
-        budget: Node budget for spreading
+        budget: Node budget for spreading per fact type
         semantic_threshold: Minimum semantic similarity to include
 
     Returns:
-        List of RetrievalResult objects with temporal scores
+        Dict mapping fact_type -> list of RetrievalResult
     """
+    from ..memory_engine import fq_table
 
-    # Ensure start_date and end_date are timezone-aware (UTC) to match database datetimes
+    # Ensure dates are timezone-aware
     if start_date.tzinfo is None:
         start_date = start_date.replace(tzinfo=UTC)
     if end_date.tzinfo is None:
         end_date = end_date.replace(tzinfo=UTC)
 
+    # Build tags clause
+    tags_clause = build_tags_where_clause_simple(tags, 7, match=tags_match)
+    params = [query_emb_str, bank_id, fact_types, start_date, end_date, semantic_threshold]
+    if tags:
+        params.append(tags)
+
+    # Two-phase entry point query:
+    # Phase 1 (date_ranked): rank by date only — no embedding computation — for all units in
+    #   the temporal window. This lets the planner use date indexes for filtering.
+    # Phase 2 (sim_ranked): join back to memory_units for only the top-50-per-type candidates
+    #   and compute embedding similarity for that small set (≤ 50 × len(fact_types) rows).
+    # This avoids computing embedding distances for potentially thousands of date-range rows.
     entry_points = await conn.fetch(
         f"""
-        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, access_count, embedding, fact_type, document_id, chunk_id,
-               1 - (embedding <=> $1::vector) AS similarity
-        FROM {fq_table("memory_units")}
-        WHERE bank_id = $2
-          AND fact_type = $3
-          AND embedding IS NOT NULL
-          AND (
-              -- Match if occurred range overlaps with query range
-              (occurred_start IS NOT NULL AND occurred_end IS NOT NULL
-               AND occurred_start <= $5 AND occurred_end >= $4)
-              OR
-              -- Match if mentioned_at falls within query range
-              (mentioned_at IS NOT NULL AND mentioned_at BETWEEN $4 AND $5)
-              OR
-              -- Match if any occurred date is set and overlaps (even if only start or end is set)
-              (occurred_start IS NOT NULL AND occurred_start BETWEEN $4 AND $5)
-              OR
-              (occurred_end IS NOT NULL AND occurred_end BETWEEN $4 AND $5)
-          )
-          AND (1 - (embedding <=> $1::vector)) >= $6
-        ORDER BY COALESCE(occurred_start, mentioned_at, occurred_end) DESC, (embedding <=> $1::vector) ASC
-        LIMIT 10
+        WITH date_ranked AS MATERIALIZED (
+            SELECT id, fact_type,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY fact_type
+                       ORDER BY COALESCE(occurred_start, mentioned_at, occurred_end) DESC NULLS LAST
+                   ) AS rn
+            FROM {fq_table("memory_units")}
+            WHERE bank_id = $2
+              AND fact_type = ANY($3)
+              AND embedding IS NOT NULL
+              AND (
+                  (occurred_start IS NOT NULL AND occurred_end IS NOT NULL
+                   AND occurred_start <= $5 AND occurred_end >= $4)
+                  OR
+                  (mentioned_at IS NOT NULL AND mentioned_at BETWEEN $4 AND $5)
+                  OR
+                  (occurred_start IS NOT NULL AND occurred_start BETWEEN $4 AND $5)
+                  OR
+                  (occurred_end IS NOT NULL AND occurred_end BETWEEN $4 AND $5)
+              )
+              {tags_clause}
+        ),
+        sim_ranked AS (
+            SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id, mu.chunk_id, mu.tags,
+                   1 - (mu.embedding <=> $1::vector) AS similarity,
+                   ROW_NUMBER() OVER (PARTITION BY mu.fact_type ORDER BY mu.embedding <=> $1::vector) AS sim_rn
+            FROM date_ranked dr
+            JOIN {fq_table("memory_units")} mu ON mu.id = dr.id
+            WHERE dr.rn <= 50
+              AND (1 - (mu.embedding <=> $1::vector)) >= $6
+        )
+        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at, fact_type, document_id, chunk_id, tags, similarity
+        FROM sim_ranked
+        WHERE sim_rn <= 10
         """,
-        query_emb_str,
-        bank_id,
-        fact_type,
-        start_date,
-        end_date,
-        semantic_threshold,
+        *params,
     )
 
     if not entry_points:
-        return []
+        return {ft: [] for ft in fact_types}
 
-    # Calculate temporal scores for entry points
-    total_days = (end_date - start_date).total_seconds() / 86400
-    mid_date = start_date + (end_date - start_date) / 2  # Calculate once for all comparisons
-    results = []
-    visited = set()
-
+    # Group entry points by fact type
+    entries_by_ft: dict[str, list] = {ft: [] for ft in fact_types}
     for ep in entry_points:
-        unit_id = str(ep["id"])
-        visited.add(unit_id)
+        ft = ep["fact_type"]
+        if ft in entries_by_ft:
+            entries_by_ft[ft].append(ep)
 
-        # Calculate temporal proximity using the most relevant date
-        # Priority: occurred_start/end (event time) > mentioned_at (mention time)
-        best_date = None
-        if ep["occurred_start"] is not None and ep["occurred_end"] is not None:
-            # Use midpoint of occurred range
-            best_date = ep["occurred_start"] + (ep["occurred_end"] - ep["occurred_start"]) / 2
-        elif ep["occurred_start"] is not None:
-            best_date = ep["occurred_start"]
-        elif ep["occurred_end"] is not None:
-            best_date = ep["occurred_end"]
-        elif ep["mentioned_at"] is not None:
-            best_date = ep["mentioned_at"]
+    # Calculate shared temporal parameters
+    total_days = (end_date - start_date).total_seconds() / 86400
+    mid_date = start_date + (end_date - start_date) / 2
 
-        # Temporal proximity score (closer to range center = higher score)
-        if best_date:
-            days_from_mid = abs((best_date - mid_date).total_seconds() / 86400)
-            temporal_proximity = 1.0 - min(days_from_mid / (total_days / 2), 1.0) if total_days > 0 else 1.0
-        else:
-            temporal_proximity = 0.5  # Fallback if no dates (shouldn't happen due to WHERE clause)
+    # Process each fact type (spreading needs to stay per fact type due to link filtering)
+    results_by_ft: dict[str, list[RetrievalResult]] = {}
 
-        # Create RetrievalResult with temporal scores
-        ep_result = RetrievalResult.from_db_row(dict(ep))
-        ep_result.temporal_score = temporal_proximity
-        ep_result.temporal_proximity = temporal_proximity
-        results.append(ep_result)
+    for ft in fact_types:
+        ft_entry_points = entries_by_ft.get(ft, [])
+        if not ft_entry_points:
+            results_by_ft[ft] = []
+            continue
 
-    # Spread through temporal links
-    queue = [
-        (RetrievalResult.from_db_row(dict(ep)), ep["similarity"], 1.0) for ep in entry_points
-    ]  # (unit, semantic_sim, temporal_score)
-    budget_remaining = budget - len(entry_points)
+        results = []
+        visited = set()
+        node_scores = {}
 
-    while queue and budget_remaining > 0:
-        current, semantic_sim, temporal_score = queue.pop(0)
-        current_id = current.id
+        # Process entry points
+        for ep in ft_entry_points:
+            unit_id = str(ep["id"])
+            visited.add(unit_id)
 
-        # Get neighbors via temporal and causal links
-        if budget_remaining > 0:
+            # Calculate temporal proximity
+            best_date = None
+            if ep["occurred_start"] is not None and ep["occurred_end"] is not None:
+                best_date = ep["occurred_start"] + (ep["occurred_end"] - ep["occurred_start"]) / 2
+            elif ep["occurred_start"] is not None:
+                best_date = ep["occurred_start"]
+            elif ep["occurred_end"] is not None:
+                best_date = ep["occurred_end"]
+            elif ep["mentioned_at"] is not None:
+                best_date = ep["mentioned_at"]
+
+            if best_date:
+                days_from_mid = abs((best_date - mid_date).total_seconds() / 86400)
+                temporal_proximity = 1.0 - min(days_from_mid / (total_days / 2), 1.0) if total_days > 0 else 1.0
+            else:
+                temporal_proximity = 0.5
+
+            ep_result = RetrievalResult.from_db_row(dict(ep))
+            ep_result.temporal_score = temporal_proximity
+            ep_result.temporal_proximity = temporal_proximity
+            results.append(ep_result)
+            node_scores[unit_id] = (ep["similarity"], 1.0)
+
+        # Spreading through temporal links (same as single-fact-type version)
+        frontier = list(node_scores.keys())
+        budget_remaining = budget - len(ft_entry_points)
+        batch_size = 20
+        # Per-source neighbor limit: lets the planner use the composite index
+        # (from_unit_id, link_type, weight DESC) with early termination, avoiding
+        # a full scan of all links from all source nodes before sorting.
+        per_source_limit = 10
+        # Safety cap on BFS iterations to prevent runaway spreading in dense graphs.
+        max_iterations = 5
+        iteration = 0
+
+        # Build tags clause for spreading (use param 7 since 1-6 are used)
+        spreading_tags_clause = build_tags_where_clause_simple(tags, 7, table_alias="mu.", match=tags_match)
+
+        while frontier and budget_remaining > 0 and iteration < max_iterations:
+            iteration += 1
+            batch_ids = frontier[:batch_size]
+            frontier = frontier[batch_size:]
+
+            # $1=query_emb, $2=batch_ids, $3=fact_type, $4=threshold, $5=per_source_limit, $6=bank_id, $7=tags
+            spreading_params = [query_emb_str, batch_ids, ft, semantic_threshold, per_source_limit, bank_id]
+            if tags:
+                spreading_params.append(tags)
+
+            # LATERAL join: for each source node, fetch top-K neighbors by weight using
+            # the existing idx_memory_links_from_type_weight index with early-exit semantics.
+            # This avoids scanning all temporal links from all source nodes before sorting.
+            # bank_id on memory_units lets the planner use idx_memory_units_bank_fact_type.
             neighbors = await conn.fetch(
                 f"""
-                SELECT mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.access_count, mu.embedding, mu.fact_type, mu.document_id, mu.chunk_id,
-                       ml.weight, ml.link_type,
+                SELECT src.from_unit_id, mu.id, mu.text, mu.context, mu.event_date, mu.occurred_start, mu.occurred_end, mu.mentioned_at, mu.fact_type, mu.document_id, mu.chunk_id, mu.tags,
+                       l.weight, l.link_type,
                        1 - (mu.embedding <=> $1::vector) AS similarity
-                FROM {fq_table("memory_links")} ml
-                JOIN {fq_table("memory_units")} mu ON ml.to_unit_id = mu.id
-                WHERE ml.from_unit_id = $2
-                  AND ml.link_type IN ('temporal', 'causes', 'caused_by', 'enables', 'prevents')
-                  AND ml.weight >= 0.1
+                FROM unnest($2::uuid[]) AS src(from_unit_id)
+                CROSS JOIN LATERAL (
+                    SELECT ml.to_unit_id, ml.weight, ml.link_type
+                    FROM {fq_table("memory_links")} ml
+                    WHERE ml.from_unit_id = src.from_unit_id
+                      AND ml.link_type IN ('temporal', 'causes', 'caused_by', 'enables', 'prevents')
+                      AND ml.weight >= 0.1
+                    ORDER BY ml.weight DESC
+                    LIMIT $5
+                ) l
+                JOIN {fq_table("memory_units")} mu ON mu.id = l.to_unit_id
+                WHERE mu.bank_id = $6
                   AND mu.fact_type = $3
                   AND mu.embedding IS NOT NULL
                   AND (1 - (mu.embedding <=> $1::vector)) >= $4
-                ORDER BY ml.weight DESC
-                LIMIT 10
+                  {spreading_tags_clause}
                 """,
-                query_emb_str,
-                current.id,
-                fact_type,
-                semantic_threshold,
+                *spreading_params,
             )
 
             for n in neighbors:
@@ -302,7 +460,9 @@ async def retrieve_temporal(
                 visited.add(neighbor_id)
                 budget_remaining -= 1
 
-                # Calculate temporal score for neighbor using best available date
+                parent_id = str(n["from_unit_id"])
+                _, parent_temporal_score = node_scores.get(parent_id, (0.5, 0.5))
+
                 neighbor_best_date = None
                 if n["occurred_start"] is not None and n["occurred_end"] is not None:
                     neighbor_best_date = n["occurred_start"] + (n["occurred_end"] - n["occurred_start"]) / 2
@@ -319,9 +479,8 @@ async def retrieve_temporal(
                         1.0 - min(days_from_mid / (total_days / 2), 1.0) if total_days > 0 else 1.0
                     )
                 else:
-                    neighbor_temporal_proximity = 0.3  # Lower score if no temporal data
+                    neighbor_temporal_proximity = 0.3
 
-                # Boost causal links (same as graph retrieval)
                 link_type = n["link_type"]
                 if link_type in ("causes", "caused_by"):
                     causal_boost = 2.0
@@ -330,370 +489,189 @@ async def retrieve_temporal(
                 else:
                     causal_boost = 1.0
 
-                # Propagate temporal score through links (decay, with causal boost)
-                propagated_temporal = temporal_score * n["weight"] * causal_boost * 0.7
-
-                # Combined temporal score
+                propagated_temporal = parent_temporal_score * n["weight"] * causal_boost * 0.7
                 combined_temporal = max(neighbor_temporal_proximity, propagated_temporal)
 
-                # Create RetrievalResult with temporal scores
                 neighbor_result = RetrievalResult.from_db_row(dict(n))
                 neighbor_result.temporal_score = combined_temporal
                 neighbor_result.temporal_proximity = neighbor_temporal_proximity
                 results.append(neighbor_result)
 
-                # Add to queue for further spreading
                 if budget_remaining > 0 and combined_temporal > 0.2:
-                    queue.append((neighbor_result, n["similarity"], combined_temporal))
+                    node_scores[neighbor_id] = (n["similarity"], combined_temporal)
+                    frontier.append(neighbor_id)
 
                 if budget_remaining <= 0:
                     break
 
-    return results
+        results_by_ft[ft] = results
+
+    return results_by_ft
 
 
-async def retrieve_parallel(
+async def retrieve_all_fact_types_parallel(
     pool,
     query_text: str,
     query_embedding_str: str,
     bank_id: str,
-    fact_type: str,
+    fact_types: list[str],
     thinking_budget: int,
     question_date: datetime | None = None,
     query_analyzer: Optional["QueryAnalyzer"] = None,
     graph_retriever: GraphRetriever | None = None,
-) -> ParallelRetrievalResult:
+    tags: list[str] | None = None,
+    tags_match: TagsMatch = "any",
+) -> MultiFactTypeRetrievalResult:
     """
-    Run 3-way or 4-way parallel retrieval (adds temporal if detected).
+    Optimized retrieval for multiple fact types using batched queries.
+
+    This reduces database round-trips by:
+    1. Combining semantic + BM25 into one CTE query for ALL fact types (1 query instead of 2N)
+    2. Running graph retrieval per fact type in parallel (N parallel tasks)
+    3. Running temporal retrieval per fact type in parallel (N parallel tasks)
 
     Args:
         pool: Database connection pool
         query_text: Query text
         query_embedding_str: Query embedding as string
         bank_id: Bank ID
-        fact_type: Fact type to filter
+        fact_types: List of fact types to retrieve
         thinking_budget: Budget for graph traversal and retrieval limits
         question_date: Optional date when question was asked (for temporal filtering)
         query_analyzer: Query analyzer to use (defaults to TransformerQueryAnalyzer)
         graph_retriever: Graph retrieval strategy (defaults to configured retriever)
 
     Returns:
-        ParallelRetrievalResult with semantic, bm25, graph, temporal results and timings
+        MultiFactTypeRetrievalResult with results organized by fact type
     """
+    import time
+
+    retriever = graph_retriever or get_default_graph_retriever()
+    start_time = time.time()
+    timings: dict[str, float] = {}
+
+    # Step 1: Extract temporal constraint first (CPU work, no DB)
+    # Do this before DB queries so we know if we need temporal retrieval
+    temporal_extraction_start = time.time()
     from .temporal_extraction import extract_temporal_constraint
 
     temporal_constraint = extract_temporal_constraint(query_text, reference_date=question_date, analyzer=query_analyzer)
+    temporal_extraction_time = time.time() - temporal_extraction_start
+    timings["temporal_extraction"] = temporal_extraction_time
 
-    retriever = graph_retriever or get_default_graph_retriever()
+    # Step 2: Run semantic + BM25 + temporal combined in ONE connection!
+    # This reduces connection usage from 2 to 1 for these operations
+    semantic_bm25_start = time.time()
+    temporal_results_by_ft: dict[str, list[RetrievalResult]] = {}
+    temporal_time = 0.0
 
-    if retriever.name == "mpfp":
-        return await _retrieve_parallel_mpfp(
-            pool, query_text, query_embedding_str, bank_id, fact_type, thinking_budget, temporal_constraint, retriever
+    async with acquire_with_retry(pool) as conn:
+        conn_wait = time.time() - semantic_bm25_start
+
+        # Semantic + BM25 combined
+        semantic_bm25_results = await retrieve_semantic_bm25_combined(
+            conn,
+            query_embedding_str,
+            query_text,
+            bank_id,
+            fact_types,
+            thinking_budget,
+            tags=tags,
+            tags_match=tags_match,
         )
-    else:
-        return await _retrieve_parallel_bfs(
-            pool, query_text, query_embedding_str, bank_id, fact_type, thinking_budget, temporal_constraint, retriever
-        )
+        semantic_bm25_time = time.time() - semantic_bm25_start
 
-
-@dataclass
-class _SemanticGraphResult:
-    """Internal result from semantic→graph chain."""
-
-    semantic: list[RetrievalResult]
-    graph: list[RetrievalResult]
-    semantic_time: float
-    graph_time: float
-
-
-@dataclass
-class _TimedResult:
-    """Internal result with timing."""
-
-    results: list[RetrievalResult]
-    time: float
-
-
-async def _retrieve_parallel_mpfp(
-    pool,
-    query_text: str,
-    query_embedding_str: str,
-    bank_id: str,
-    fact_type: str,
-    thinking_budget: int,
-    temporal_constraint: tuple | None,
-    retriever: GraphRetriever,
-) -> ParallelRetrievalResult:
-    """
-    MPFP retrieval with optimized parallelization.
-
-    Runs 2-3 parallel task chains:
-    - Task 1: Semantic → Graph (chained, graph uses semantic seeds)
-    - Task 2: BM25 (independent)
-    - Task 3: Temporal (if constraint detected)
-    """
-    import time
-
-    async def run_semantic_then_graph() -> _SemanticGraphResult:
-        """Chain: semantic retrieval → graph retrieval (using semantic as seeds)."""
-        start = time.time()
-        async with acquire_with_retry(pool) as conn:
-            semantic = await retrieve_semantic(conn, query_embedding_str, bank_id, fact_type, limit=thinking_budget)
-        semantic_time = time.time() - start
-
-        # Get temporal seeds if needed (quick query, part of this chain)
-        temporal_seeds = None
+        # Temporal combined (if constraint detected) - same connection!
         if temporal_constraint:
             tc_start, tc_end = temporal_constraint
-            async with acquire_with_retry(pool) as conn:
-                temporal_seeds = await _get_temporal_entry_points(
-                    conn, query_embedding_str, bank_id, fact_type, tc_start, tc_end, limit=20
-                )
-
-        # Run graph with seeds
-        start = time.time()
-        graph = await retriever.retrieve(
-            pool=pool,
-            query_embedding_str=query_embedding_str,
-            bank_id=bank_id,
-            fact_type=fact_type,
-            budget=thinking_budget,
-            query_text=query_text,
-            semantic_seeds=semantic,
-            temporal_seeds=temporal_seeds,
-        )
-        graph_time = time.time() - start
-
-        return _SemanticGraphResult(semantic, graph, semantic_time, graph_time)
-
-    async def run_bm25() -> _TimedResult:
-        """Independent BM25 retrieval."""
-        start = time.time()
-        async with acquire_with_retry(pool) as conn:
-            results = await retrieve_bm25(conn, query_text, bank_id, fact_type, limit=thinking_budget)
-        return _TimedResult(results, time.time() - start)
-
-    async def run_temporal(tc_start, tc_end) -> _TimedResult:
-        """Temporal retrieval (uses its own entry point finding)."""
-        start = time.time()
-        async with acquire_with_retry(pool) as conn:
-            results = await retrieve_temporal(
+            temporal_start = time.time()
+            temporal_results_by_ft = await retrieve_temporal_combined(
                 conn,
                 query_embedding_str,
                 bank_id,
-                fact_type,
+                fact_types,
                 tc_start,
                 tc_end,
                 budget=thinking_budget,
                 semantic_threshold=0.1,
+                tags=tags,
+                tags_match=tags_match,
             )
-        return _TimedResult(results, time.time() - start)
+            temporal_time = time.time() - temporal_start
 
-    # Run parallel task chains
-    if temporal_constraint:
-        tc_start, tc_end = temporal_constraint
-        sg_result, bm25_result, temporal_result = await asyncio.gather(
-            run_semantic_then_graph(),
-            run_bm25(),
-            run_temporal(tc_start, tc_end),
+    timings["semantic_bm25_combined"] = semantic_bm25_time
+    timings["temporal_combined"] = temporal_time
+
+    # Step 3: Run graph retrieval for each fact type in parallel
+    async def run_graph_for_fact_type(ft: str) -> tuple[str, list[RetrievalResult], float, MPFPTimings | None]:
+        graph_start = time.time()
+        results, mpfp_timing = await retriever.retrieve(
+            pool=pool,
+            query_embedding_str=query_embedding_str,
+            bank_id=bank_id,
+            fact_type=ft,
+            budget=thinking_budget,
+            query_text=query_text,
+            semantic_seeds=None,
+            temporal_seeds=None,
+            tags=tags,
+            tags_match=tags_match,
         )
-        return ParallelRetrievalResult(
-            semantic=sg_result.semantic,
-            bm25=bm25_result.results,
-            graph=sg_result.graph,
-            temporal=temporal_result.results,
+        return ft, results, time.time() - graph_start, mpfp_timing
+
+    # Run graph for all fact types in parallel
+    graph_tasks = [run_graph_for_fact_type(ft) for ft in fact_types]
+    graph_results_list = await asyncio.gather(*graph_tasks)
+
+    # Organize results by fact type
+    results_by_fact_type: dict[str, ParallelRetrievalResult] = {}
+    max_conn_wait = conn_wait  # Single connection for semantic+bm25+temporal
+    all_mpfp_timings: list[MPFPTimings] = []
+
+    for ft in fact_types:
+        # Get semantic + bm25 results for this fact type
+        semantic_results, bm25_results = semantic_bm25_results.get(ft, ([], []))
+
+        # Find graph results for this fact type
+        graph_results = []
+        graph_time = 0.0
+        mpfp_timing = None
+        for gr in graph_results_list:
+            if gr[0] == ft:
+                graph_results = gr[1]
+                graph_time = gr[2]
+                mpfp_timing = gr[3]
+                if mpfp_timing:
+                    all_mpfp_timings.append(mpfp_timing)
+                break
+
+        # Get temporal results for this fact type from combined result
+        temporal_results = temporal_results_by_ft.get(ft) if temporal_constraint else None
+        if temporal_results is not None and len(temporal_results) == 0:
+            temporal_results = None
+
+        results_by_fact_type[ft] = ParallelRetrievalResult(
+            semantic=semantic_results,
+            bm25=bm25_results,
+            graph=graph_results,
+            temporal=temporal_results,
             timings={
-                "semantic": sg_result.semantic_time,
-                "graph": sg_result.graph_time,
-                "bm25": bm25_result.time,
-                "temporal": temporal_result.time,
+                "semantic": semantic_bm25_time / 2,  # Approximate split
+                "bm25": semantic_bm25_time / 2,
+                "graph": graph_time,
+                "temporal": temporal_time,  # Same for all fact types (single query)
+                "temporal_extraction": temporal_extraction_time,
             },
             temporal_constraint=temporal_constraint,
-        )
-    else:
-        sg_result, bm25_result = await asyncio.gather(
-            run_semantic_then_graph(),
-            run_bm25(),
-        )
-        return ParallelRetrievalResult(
-            semantic=sg_result.semantic,
-            bm25=bm25_result.results,
-            graph=sg_result.graph,
-            temporal=None,
-            timings={
-                "semantic": sg_result.semantic_time,
-                "graph": sg_result.graph_time,
-                "bm25": bm25_result.time,
-            },
-            temporal_constraint=None,
+            mpfp_timings=[mpfp_timing] if mpfp_timing else [],
+            max_conn_wait=max_conn_wait,
         )
 
+    total_time = time.time() - start_time
+    timings["total"] = total_time
 
-async def _get_temporal_entry_points(
-    conn,
-    query_embedding_str: str,
-    bank_id: str,
-    fact_type: str,
-    start_date: datetime,
-    end_date: datetime,
-    limit: int = 20,
-    semantic_threshold: float = 0.1,
-) -> list[RetrievalResult]:
-    """Get temporal entry points (facts in date range with semantic relevance)."""
-
-    if start_date.tzinfo is None:
-        start_date = start_date.replace(tzinfo=UTC)
-    if end_date.tzinfo is None:
-        end_date = end_date.replace(tzinfo=UTC)
-
-    rows = await conn.fetch(
-        f"""
-        SELECT id, text, context, event_date, occurred_start, occurred_end, mentioned_at,
-               access_count, embedding, fact_type, document_id, chunk_id,
-               1 - (embedding <=> $1::vector) AS similarity
-        FROM {fq_table("memory_units")}
-        WHERE bank_id = $2
-          AND fact_type = $3
-          AND embedding IS NOT NULL
-          AND (
-              (occurred_start IS NOT NULL AND occurred_end IS NOT NULL
-               AND occurred_start <= $5 AND occurred_end >= $4)
-              OR (mentioned_at IS NOT NULL AND mentioned_at BETWEEN $4 AND $5)
-              OR (occurred_start IS NOT NULL AND occurred_start BETWEEN $4 AND $5)
-              OR (occurred_end IS NOT NULL AND occurred_end BETWEEN $4 AND $5)
-          )
-          AND (1 - (embedding <=> $1::vector)) >= $6
-        ORDER BY COALESCE(occurred_start, mentioned_at, occurred_end) DESC,
-                 (embedding <=> $1::vector) ASC
-        LIMIT $7
-        """,
-        query_embedding_str,
-        bank_id,
-        fact_type,
-        start_date,
-        end_date,
-        semantic_threshold,
-        limit,
+    return MultiFactTypeRetrievalResult(
+        results_by_fact_type=results_by_fact_type,
+        timings=timings,
+        max_conn_wait=max_conn_wait,
     )
-
-    results = []
-    total_days = max((end_date - start_date).total_seconds() / 86400, 1)
-    mid_date = start_date + (end_date - start_date) / 2
-
-    for row in rows:
-        result = RetrievalResult.from_db_row(dict(row))
-
-        # Calculate temporal proximity score
-        best_date = None
-        if row["occurred_start"] and row["occurred_end"]:
-            best_date = row["occurred_start"] + (row["occurred_end"] - row["occurred_start"]) / 2
-        elif row["occurred_start"]:
-            best_date = row["occurred_start"]
-        elif row["occurred_end"]:
-            best_date = row["occurred_end"]
-        elif row["mentioned_at"]:
-            best_date = row["mentioned_at"]
-
-        if best_date:
-            days_from_mid = abs((best_date - mid_date).total_seconds() / 86400)
-            result.temporal_proximity = 1.0 - min(days_from_mid / (total_days / 2), 1.0)
-        else:
-            result.temporal_proximity = 0.5
-
-        result.temporal_score = result.temporal_proximity
-        results.append(result)
-
-    return results
-
-
-async def _retrieve_parallel_bfs(
-    pool,
-    query_text: str,
-    query_embedding_str: str,
-    bank_id: str,
-    fact_type: str,
-    thinking_budget: int,
-    temporal_constraint: tuple | None,
-    retriever: GraphRetriever,
-) -> ParallelRetrievalResult:
-    """BFS retrieval: all methods run in parallel (original behavior)."""
-    import time
-
-    async def run_semantic() -> _TimedResult:
-        start = time.time()
-        async with acquire_with_retry(pool) as conn:
-            results = await retrieve_semantic(conn, query_embedding_str, bank_id, fact_type, limit=thinking_budget)
-        return _TimedResult(results, time.time() - start)
-
-    async def run_bm25() -> _TimedResult:
-        start = time.time()
-        async with acquire_with_retry(pool) as conn:
-            results = await retrieve_bm25(conn, query_text, bank_id, fact_type, limit=thinking_budget)
-        return _TimedResult(results, time.time() - start)
-
-    async def run_graph() -> _TimedResult:
-        start = time.time()
-        results = await retriever.retrieve(
-            pool=pool,
-            query_embedding_str=query_embedding_str,
-            bank_id=bank_id,
-            fact_type=fact_type,
-            budget=thinking_budget,
-            query_text=query_text,
-        )
-        return _TimedResult(results, time.time() - start)
-
-    async def run_temporal(tc_start, tc_end) -> _TimedResult:
-        start = time.time()
-        async with acquire_with_retry(pool) as conn:
-            results = await retrieve_temporal(
-                conn,
-                query_embedding_str,
-                bank_id,
-                fact_type,
-                tc_start,
-                tc_end,
-                budget=thinking_budget,
-                semantic_threshold=0.1,
-            )
-        return _TimedResult(results, time.time() - start)
-
-    if temporal_constraint:
-        tc_start, tc_end = temporal_constraint
-        semantic_r, bm25_r, graph_r, temporal_r = await asyncio.gather(
-            run_semantic(),
-            run_bm25(),
-            run_graph(),
-            run_temporal(tc_start, tc_end),
-        )
-        return ParallelRetrievalResult(
-            semantic=semantic_r.results,
-            bm25=bm25_r.results,
-            graph=graph_r.results,
-            temporal=temporal_r.results,
-            timings={
-                "semantic": semantic_r.time,
-                "bm25": bm25_r.time,
-                "graph": graph_r.time,
-                "temporal": temporal_r.time,
-            },
-            temporal_constraint=temporal_constraint,
-        )
-    else:
-        semantic_r, bm25_r, graph_r = await asyncio.gather(
-            run_semantic(),
-            run_bm25(),
-            run_graph(),
-        )
-        return ParallelRetrievalResult(
-            semantic=semantic_r.results,
-            bm25=bm25_r.results,
-            graph=graph_r.results,
-            temporal=None,
-            timings={
-                "semantic": semantic_r.time,
-                "bm25": bm25_r.time,
-                "graph": graph_r.time,
-            },
-            temporal_constraint=None,
-        )

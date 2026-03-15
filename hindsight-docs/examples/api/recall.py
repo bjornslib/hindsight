@@ -26,8 +26,26 @@ client.retain(bank_id="my-bank", content="Bob is a data scientist who works with
 
 # [docs:recall-basic]
 response = client.recall(bank_id="my-bank", query="What does Alice do?")
-for r in response.results:
-    print(f"- {r.text}")
+
+# response.results is a list of RecallResult objects, each with:
+# - id:             fact ID
+# - text:           the extracted fact
+# - type:           "world", "experience", or "observation"
+# - context:        context label set during retain
+# - metadata:       dict[str, str] set during retain
+# - tags:           list of tags
+# - entities:       list of entity name strings linked to this fact
+# - occurred_start: ISO datetime of when the event started
+# - occurred_end:   ISO datetime of when the event ended
+# - mentioned_at:   ISO datetime of when the fact was retained
+# - document_id:    document this fact belongs to
+# - chunk_id:       chunk this fact was extracted from
+
+# Example response.results:
+# [
+#   RecallResult(id="a1b2...", text="Alice works at Google as a software engineer", type="world", context="career", ...),
+#   RecallResult(id="c3d4...", text="Alice got promoted to senior engineer", type="experience", occurred_start="2024-03-15T00:00:00Z", ...),
+# ]
 # [/docs:recall-basic]
 
 
@@ -39,18 +57,11 @@ response = client.recall(
     budget="high",
     max_tokens=8000,
     trace=True,
-    include_entities=True,
-    max_entity_tokens=500
 )
 
 # Access results
 for r in response.results:
     print(f"- {r.text}")
-
-# Access entity observations (if include_entities=True)
-if response.entities:
-    for entity_id, entity in response.entities.items():
-        print(f"Entity: {entity.canonical_name}")
 # [/docs:recall-with-options]
 
 
@@ -74,14 +85,52 @@ experience = client.recall(
 # [/docs:recall-experience-only]
 
 
-# [docs:recall-opinions-only]
-# Only opinions (formed beliefs)
-opinions = client.recall(
+# [docs:recall-observations-only]
+# Only observations (consolidated knowledge)
+observations = client.recall(
     bank_id="my-bank",
-    query="What do I think about Python?",
-    types=["opinion"]
+    query="What patterns have I learned?",
+    types=["observation"]
 )
-# [/docs:recall-opinions-only]
+# [/docs:recall-observations-only]
+
+
+# [docs:recall-with-observations]
+# Include observations in recall
+results = client.recall(
+    bank_id="my-bank",
+    query="What programming languages does Alice prefer?",
+    types=["world", "experience", "observation"]
+)
+
+# Observations only
+observations = client.recall(
+    bank_id="my-bank",
+    query="What patterns have I learned?",
+    types=["observation"]
+)
+# [/docs:recall-with-observations]
+
+
+# [docs:recall-source-facts]
+# Recall observations and include their source facts
+response = client.recall(
+    bank_id="my-bank",
+    query="What patterns have I learned about Alice?",
+    types=["observation"],
+    include_source_facts=True,
+    max_source_facts_tokens=4096,
+)
+
+for obs in response.results:
+    print(f"Observation: {obs.text}")
+    if obs.source_fact_ids and response.source_facts:
+        print("  Derived from:")
+        for fact_id in obs.source_fact_ids:
+            fact = response.source_facts.get(fact_id)
+            if fact:
+                print(f"    - [{fact.type}] {fact.text}")
+# [/docs:recall-source-facts]
 
 
 # [docs:recall-token-budget]
@@ -93,18 +142,6 @@ results = client.recall(bank_id="my-bank", query="Alice's email", max_tokens=500
 # [/docs:recall-token-budget]
 
 
-# [docs:recall-include-entities]
-response = client.recall(
-    bank_id="my-bank",
-    query="What does Alice do?",
-    max_tokens=4096,              # Budget for memories
-    include_entities=True,
-    max_entity_tokens=1000        # Budget for entity observations
-)
-
-# Access the additional context
-entities = response.entities or []
-# [/docs:recall-include-entities]
 
 
 # [docs:recall-budget-levels]
@@ -114,6 +151,126 @@ results = client.recall(bank_id="my-bank", query="Alice's email", budget="low")
 # Deep exploration
 results = client.recall(bank_id="my-bank", query="How are Alice and Bob connected?", budget="high")
 # [/docs:recall-budget-levels]
+
+
+# [docs:recall-with-tags]
+# Filter recall to only memories tagged for a specific user
+response = client.recall(
+    bank_id="my-bank",
+    query="What feedback did the user give?",
+    tags=["user:alice"],
+    tags_match="any"  # OR matching, includes untagged (default)
+)
+# [/docs:recall-with-tags]
+
+
+# [docs:recall-tags-strict]
+# Strict mode: only return memories that have matching tags (exclude untagged)
+response = client.recall(
+    bank_id="my-bank",
+    query="What did the user say?",
+    tags=["user:alice"],
+    tags_match="any_strict"  # OR matching, excludes untagged memories
+)
+# [/docs:recall-tags-strict]
+
+
+# [docs:recall-tags-all]
+# AND matching: require ALL specified tags to be present
+response = client.recall(
+    bank_id="my-bank",
+    query="What bugs were reported?",
+    tags=["user:alice", "bug-report"],
+    tags_match="all_strict"  # Memory must have BOTH tags
+)
+# [/docs:recall-tags-all]
+
+
+# [docs:recall-tags-any]
+response = client.recall(
+    bank_id="my-bank",
+    query="communication preferences",
+    tags=["user:alice"],
+    tags_match="any",  # default
+)
+# Returns:
+#   [match]    "Alice prefers async communication"     — has "user:alice"
+#   [no match] "Bob dislikes long meetings"             — no overlap with ["user:alice"]
+#   [match]    "Team uses Slack for announcements"      — has "user:alice"
+#   [match]    "Company policy: no meetings on Fridays" — untagged, included by default
+# [/docs:recall-tags-any]
+
+
+# [docs:recall-tags-any-strict]
+response = client.recall(
+    bank_id="my-bank",
+    query="communication preferences",
+    tags=["user:alice"],
+    tags_match="any_strict",
+)
+# Returns:
+#   [match]    "Alice prefers async communication"     — has "user:alice"
+#   [no match] "Bob dislikes long meetings"             — no overlap with ["user:alice"]
+#   [match]    "Team uses Slack for announcements"      — has "user:alice"
+#   [no match] "Company policy: no meetings on Fridays" — untagged, excluded
+# [/docs:recall-tags-any-strict]
+
+
+# [docs:recall-tags-all-mode]
+response = client.recall(
+    bank_id="my-bank",
+    query="communication tools",
+    tags=["user:alice", "team"],
+    tags_match="all",
+)
+# Returns:
+#   [no match] "Alice prefers async communication"     — missing "team"
+#   [no match] "Bob dislikes long meetings"             — missing both tags
+#   [match]    "Team uses Slack for announcements"      — has both "user:alice" and "team"
+#   [match]    "Company policy: no meetings on Fridays" — untagged, included by default
+# [/docs:recall-tags-all-mode]
+
+
+# [docs:recall-tags-all-strict]
+response = client.recall(
+    bank_id="my-bank",
+    query="communication tools",
+    tags=["user:alice", "team"],
+    tags_match="all_strict",
+)
+# Returns:
+#   [no match] "Alice prefers async communication"     — missing "team"
+#   [no match] "Bob dislikes long meetings"             — missing both tags
+#   [match]    "Team uses Slack for announcements"      — has both "user:alice" and "team"
+#   [no match] "Company policy: no meetings on Fridays" — untagged, excluded
+# [/docs:recall-tags-all-strict]
+
+
+# =============================================================================
+# Legacy snippets for v0.3 docs (kept for backward compatibility)
+# =============================================================================
+
+# [docs:recall-opinions-only]
+# Legacy: opinions replaced by observations in v0.4+
+# Only retrieve opinions (beliefs and preferences)
+opinions = client.recall(
+    bank_id="my-bank",
+    query="What are my preferences?",
+    types=["opinion"]
+)
+# [/docs:recall-opinions-only]
+
+
+# [docs:recall-include-entities]
+# Legacy: entity summaries replaced by observations in v0.4+
+# Include entity summaries in recall results
+response = client.recall(
+    bank_id="my-bank",
+    query="What do I know about Alice?",
+    include_entities=True,
+    max_entity_tokens=500
+)
+# [/docs:recall-include-entities]
 
 
 # =============================================================================

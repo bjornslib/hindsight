@@ -18,6 +18,11 @@ class RequestContext:
     """
 
     api_key: str | None = None
+    api_key_id: str | None = None  # UUID of the API key used for authentication
+    tenant_id: str | None = None  # Tenant identifier (set by extension after auth)
+    internal: bool = False  # True for background/internal operations (skips extension auth)
+    user_initiated: bool = False  # True for async operations that originated from a user request
+    allowed_bank_ids: list[str] | None = None  # None = unrestricted (all banks)
 
 
 from pgvector.sqlalchemy import Vector
@@ -37,6 +42,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from .config import EMBEDDING_DIMENSION
 
 
 class Base(AsyncAttrs, DeclarativeBase):
@@ -78,7 +85,7 @@ class MemoryUnit(Base):
     bank_id: Mapped[str] = mapped_column(Text, nullable=False)
     document_id: Mapped[str | None] = mapped_column(Text)
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding = mapped_column(Vector(384))  # pgvector type
+    embedding = mapped_column(Vector(EMBEDDING_DIMENSION))  # pgvector type
     context: Mapped[str | None] = mapped_column(Text)
     event_date: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False
@@ -90,7 +97,6 @@ class MemoryUnit(Base):
     mentioned_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))  # When fact was mentioned
     fact_type: Mapped[str] = mapped_column(Text, nullable=False, server_default="world")
     confidence_score: Mapped[float | None] = mapped_column(Float)
-    access_count: Mapped[int] = mapped_column(Integer, server_default="0")
     unit_metadata: Mapped[dict] = mapped_column(
         "metadata", JSONB, server_default=sql_text("'{}'::jsonb")
     )  # User-defined metadata (str->str)
@@ -126,7 +132,6 @@ class MemoryUnit(Base):
         Index("idx_memory_units_document_id", "document_id"),
         Index("idx_memory_units_event_date", "event_date", postgresql_ops={"event_date": "DESC"}),
         Index("idx_memory_units_bank_date", "bank_id", "event_date", postgresql_ops={"event_date": "DESC"}),
-        Index("idx_memory_units_access_count", "access_count", postgresql_ops={"access_count": "DESC"}),
         Index("idx_memory_units_fact_type", "fact_type"),
         Index("idx_memory_units_bank_fact_type", "bank_id", "fact_type"),
         Index(

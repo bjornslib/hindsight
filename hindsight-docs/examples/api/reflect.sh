@@ -31,6 +31,30 @@ hindsight memory reflect my-bank "Summarize my week" --budget high
 # [/docs:reflect-high-budget]
 
 
+# [docs:reflect-structured-output]
+# First, create a JSON schema file schema.json:
+cat > schema.json << 'EOF'
+{
+  "type": "object",
+  "properties": {
+    "recommendation": {"type": "string"},
+    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    "key_factors": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["recommendation", "confidence", "key_factors"]
+}
+EOF
+
+# Then use the --schema flag:
+hindsight memory reflect hiring-team \
+  "Should we hire Alice for the ML team lead position?" \
+  --schema schema.json
+
+# Cleanup the temporary schema file
+rm -f schema.json
+# [/docs:reflect-structured-output]
+
+
 # =============================================================================
 # Cleanup (not shown in docs)
 # =============================================================================

@@ -55,11 +55,19 @@ pub struct MemoryPutResult {
     pub items_count: i64,
     pub message: String,
     pub is_async: bool,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileRetainResult {
+    pub operation_ids: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct ApiClient {
     client: AsyncClient,
+    http_client: reqwest::Client,
+    base_url: String,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
 }
 
@@ -83,8 +91,8 @@ impl ApiClient {
 
         let http_client = client_builder.build()?;
 
-        let client = AsyncClient::new_with_client(&base_url, http_client);
-        Ok(ApiClient { client, runtime })
+        let client = AsyncClient::new_with_client(&base_url, http_client.clone());
+        Ok(ApiClient { client, http_client, base_url, runtime })
     }
 
     pub fn list_agents(&self, _verbose: bool) -> Result<Vec<types::BankListItem>> {
@@ -103,7 +111,7 @@ impl ApiClient {
 
     pub fn get_stats(&self, agent_id: &str, _verbose: bool) -> Result<AgentStats> {
         self.runtime.block_on(async {
-            let response = self.client.get_agent_stats(agent_id).await?;
+            let response = self.client.get_agent_stats(agent_id, None).await?;
             let value = response.into_inner();
             // Convert to JSON Value first, then parse into our type
             let json_value = serde_json::to_value(&value)?;
@@ -116,8 +124,10 @@ impl ApiClient {
         self.runtime.block_on(async {
             let request = types::CreateBankRequest {
                 name: Some(name.to_string()),
+                mission: None,
                 background: None,
                 disposition: None,
+                ..Default::default()
             };
             let response = self.client.create_or_update_bank(agent_id, None, &request).await?;
             Ok(response.into_inner())
@@ -161,7 +171,112 @@ impl ApiClient {
                 items_count: result.items_count,
                 message: format!("Stored {} memory units", result.items_count),
                 is_async: result.async_,
+                operation_id: result.operation_id,
             })
+        })
+    }
+
+    /// Upload files to the file retain endpoint (multipart/form-data).
+    /// Returns a list of operation IDs for tracking. Always async server-side.
+    pub fn file_retain(
+        &self,
+        bank_id: &str,
+        files: Vec<(String, Vec<u8>)>,
+        context: Option<String>,
+        verbose: bool,
+    ) -> Result<FileRetainResult> {
+        self.runtime.block_on(async {
+            let url = format!("{}/v1/default/banks/{}/files/retain", self.base_url, bank_id);
+
+            let files_metadata: Vec<serde_json::Value> = files
+                .iter()
+                .map(|(name, _)| {
+                    let mut meta = serde_json::json!({});
+                    if let Some(ctx) = &context {
+                        meta["context"] = serde_json::Value::String(ctx.clone());
+                    }
+                    // Use filename stem as document_id for deduplication
+                    if let Some(stem) = std::path::Path::new(name)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                    {
+                        meta["document_id"] = serde_json::Value::String(stem.to_string());
+                    }
+                    meta
+                })
+                .collect();
+
+            let request_json = serde_json::json!({
+                "files_metadata": files_metadata,
+            });
+
+            let mut form = reqwest::multipart::Form::new()
+                .text("request", request_json.to_string());
+
+            for (filename, content) in files {
+                let part = reqwest::multipart::Part::bytes(content)
+                    .file_name(filename)
+                    .mime_str("application/octet-stream")?;
+                form = form.part("files", part);
+            }
+
+            if verbose {
+                eprintln!("POST {}", url);
+            }
+
+            let response = self.http_client.post(&url).multipart(form).send().await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                anyhow::bail!("File retain failed ({}): {}", status, text);
+            }
+
+            let result: FileRetainResult = response.json().await?;
+            Ok(result)
+        })
+    }
+
+    /// Poll an operation until it completes or fails.
+    /// Returns Ok(true) if completed successfully, Ok(false) if failed, Err if polling error.
+    pub fn poll_operation(&self, agent_id: &str, operation_id: &str, verbose: bool) -> Result<(bool, Option<String>)> {
+        self.runtime.block_on(async {
+            loop {
+                let response = self.client.list_operations(agent_id, None, None, None, None).await?;
+                let ops = response.into_inner();
+
+                // Find our operation
+                let op = ops.operations.iter().find(|o| o.id == operation_id);
+
+                match op {
+                    Some(operation) => {
+                        if verbose {
+                            eprintln!("Operation {} status: {}", operation_id, operation.status);
+                        }
+                        match operation.status.as_str() {
+                            "pending" => {
+                                // Still running, wait and poll again
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                            "completed" => {
+                                // Operation completed successfully
+                                return Ok((true, None));
+                            }
+                            "failed" => {
+                                return Ok((false, operation.error_message.clone()));
+                            }
+                            _ => {
+                                // Unknown status, treat as failed
+                                return Ok((false, Some(format!("Unknown status: {}", operation.status))));
+                            }
+                        }
+                    }
+                    None => {
+                        // Operation not in list means it completed successfully (removed from pending/failed)
+                        return Ok((true, None));
+                    }
+                }
+            }
         })
     }
 
@@ -184,6 +299,8 @@ impl ApiClient {
                 limit.map(|l| l as i64),
                 offset.map(|o| o as i64),
                 q,
+                None,
+                None,
                 None,
             ).await?;
             Ok(response.into_inner())
@@ -212,7 +329,7 @@ impl ApiClient {
 
     pub fn list_operations(&self, agent_id: &str, _verbose: bool) -> Result<OperationsResponse> {
         self.runtime.block_on(async {
-            let response = self.client.list_operations(agent_id, None).await?;
+            let response = self.client.list_operations(agent_id, None, None, None, None).await?;
             let value = response.into_inner();
             // Convert to JSON Value first, then parse into our type
             let json_value = serde_json::to_value(&value)?;
@@ -241,9 +358,9 @@ impl ApiClient {
         })
     }
 
-    pub fn list_entities(&self, bank_id: &str, limit: Option<i64>, _verbose: bool) -> Result<types::EntityListResponse> {
+    pub fn list_entities(&self, bank_id: &str, limit: Option<i64>, offset: Option<i64>, _verbose: bool) -> Result<types::EntityListResponse> {
         self.runtime.block_on(async {
-            let response = self.client.list_entities(bank_id, limit, None).await?;
+            let response = self.client.list_entities(bank_id, limit, offset, None).await?;
             Ok(response.into_inner())
         })
     }
@@ -270,6 +387,294 @@ impl ApiClient {
     }
 }
 
+// ============================================================================
+// Additional API methods for complete CLI coverage
+// ============================================================================
+
+impl ApiClient {
+    // --- Memory Methods ---
+
+    pub fn get_memory(&self, bank_id: &str, memory_id: &str, _verbose: bool) -> Result<serde_json::Value> {
+        self.runtime.block_on(async {
+            let response = self.client.get_memory(bank_id, memory_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Bank Methods ---
+
+    pub fn create_bank(
+        &self,
+        bank_id: &str,
+        request: &types::CreateBankRequest,
+        _verbose: bool,
+    ) -> Result<types::BankProfileResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.create_or_update_bank(bank_id, None, request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn update_bank(
+        &self,
+        bank_id: &str,
+        request: &types::CreateBankRequest,
+        _verbose: bool,
+    ) -> Result<types::BankProfileResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.update_bank(bank_id, None, request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn set_mission(
+        &self,
+        bank_id: &str,
+        mission: &str,
+        _verbose: bool,
+    ) -> Result<types::BankProfileResponse> {
+        self.runtime.block_on(async {
+            let request = types::CreateBankRequest {
+                name: None,
+                mission: Some(mission.to_string()),
+                background: None,
+                disposition: None,
+                ..Default::default()
+            };
+            let response = self.client.update_bank(bank_id, None, &request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn get_graph(
+        &self,
+        bank_id: &str,
+        type_filter: Option<&str>,
+        limit: Option<i64>,
+        _verbose: bool,
+    ) -> Result<types::GraphDataResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_graph(bank_id, limit, type_filter, None, None, None, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn get_bank_config(
+        &self,
+        bank_id: &str,
+        _verbose: bool,
+    ) -> Result<types::BankConfigResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_bank_config(bank_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn update_bank_config(
+        &self,
+        bank_id: &str,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+        _verbose: bool,
+    ) -> Result<types::BankConfigResponse> {
+        self.runtime.block_on(async {
+            // Convert HashMap to serde_json::Map
+            let updates_map: serde_json::Map<String, serde_json::Value> = updates.into_iter().collect();
+            let request = types::BankConfigUpdate { updates: updates_map };
+            let response = self.client.update_bank_config(bank_id, None, &request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn reset_bank_config(
+        &self,
+        bank_id: &str,
+        _verbose: bool,
+    ) -> Result<types::BankConfigResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.reset_bank_config(bank_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Tag Methods ---
+
+    pub fn list_tags(
+        &self,
+        bank_id: &str,
+        q: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        _verbose: bool,
+    ) -> Result<types::ListTagsResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.list_tags(bank_id, limit, offset, q, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Chunk Methods ---
+
+    pub fn get_chunk(&self, chunk_id: &str, _verbose: bool) -> Result<types::ChunkResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_chunk(chunk_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Operation Methods ---
+
+    pub fn get_operation(&self, bank_id: &str, operation_id: &str, _verbose: bool) -> Result<types::OperationStatusResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_operation_status(bank_id, operation_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Health Methods ---
+
+    pub fn health(&self, _verbose: bool) -> Result<serde_json::Value> {
+        self.runtime.block_on(async {
+            let response = self.client.health_endpoint_health_get().await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn metrics(&self, _verbose: bool) -> Result<serde_json::Value> {
+        self.runtime.block_on(async {
+            let response = self.client.metrics_endpoint_metrics_get().await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Mental Model Methods ---
+
+    pub fn list_mental_models(&self, bank_id: &str, _verbose: bool) -> Result<types::MentalModelListResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.list_mental_models(bank_id, None, None, None, None, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn get_mental_model(&self, bank_id: &str, mental_model_id: &str, _verbose: bool) -> Result<types::MentalModelResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_mental_model(bank_id, mental_model_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn create_mental_model(
+        &self,
+        bank_id: &str,
+        request: &types::CreateMentalModelRequest,
+        _verbose: bool,
+    ) -> Result<types::CreateMentalModelResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.create_mental_model(bank_id, None, request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn update_mental_model(
+        &self,
+        bank_id: &str,
+        mental_model_id: &str,
+        request: &types::UpdateMentalModelRequest,
+        _verbose: bool,
+    ) -> Result<types::MentalModelResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.update_mental_model(bank_id, mental_model_id, None, request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn delete_mental_model(&self, bank_id: &str, mental_model_id: &str, _verbose: bool) -> Result<serde_json::Value> {
+        self.runtime.block_on(async {
+            let response = self.client.delete_mental_model(bank_id, mental_model_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn refresh_mental_model(&self, bank_id: &str, mental_model_id: &str, _verbose: bool) -> Result<types::AsyncOperationSubmitResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.refresh_mental_model(bank_id, mental_model_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Directive Methods ---
+
+    pub fn list_directives(&self, bank_id: &str, _verbose: bool) -> Result<types::DirectiveListResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.list_directives(bank_id, None, None, None, None, None, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn get_directive(&self, bank_id: &str, directive_id: &str, _verbose: bool) -> Result<types::DirectiveResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_directive(bank_id, directive_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn create_directive(
+        &self,
+        bank_id: &str,
+        request: &types::CreateDirectiveRequest,
+        _verbose: bool,
+    ) -> Result<types::DirectiveResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.create_directive(bank_id, None, request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn update_directive(
+        &self,
+        bank_id: &str,
+        directive_id: &str,
+        request: &types::UpdateDirectiveRequest,
+        _verbose: bool,
+    ) -> Result<types::DirectiveResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.update_directive(bank_id, directive_id, None, request).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn delete_directive(&self, bank_id: &str, directive_id: &str, _verbose: bool) -> Result<serde_json::Value> {
+        self.runtime.block_on(async {
+            let response = self.client.delete_directive(bank_id, directive_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Consolidation Methods ---
+
+    pub fn trigger_consolidation(&self, bank_id: &str, _verbose: bool) -> Result<types::ConsolidationResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.trigger_consolidation(bank_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    pub fn clear_observations(&self, bank_id: &str, _verbose: bool) -> Result<types::DeleteResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.clear_observations(bank_id, None).await?;
+            Ok(response.into_inner())
+        })
+    }
+
+    // --- Version Methods ---
+
+    pub fn get_version(&self, _verbose: bool) -> Result<types::VersionResponse> {
+        self.runtime.block_on(async {
+            let response = self.client.get_version().await?;
+            Ok(response.into_inner())
+        })
+    }
+}
+
 // Re-export types from the generated client for use in commands
 pub use types::{
     BankProfileResponse,
@@ -281,3 +686,105 @@ pub use types::{
     ReflectResponse,
     RetainRequest,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_operation_deserialize() {
+        let json = r#"{
+            "id": "test-op-123",
+            "task_type": "retain",
+            "items_count": 5,
+            "document_id": "doc-456",
+            "created_at": "2024-01-15T10:00:00Z",
+            "status": "pending",
+            "error_message": null
+        }"#;
+        let op: Operation = serde_json::from_str(json).unwrap();
+        assert_eq!(op.id, "test-op-123");
+        assert_eq!(op.task_type, "retain");
+        assert_eq!(op.items_count, 5);
+        assert_eq!(op.document_id, Some("doc-456".to_string()));
+        assert_eq!(op.status, "pending");
+        assert!(op.error_message.is_none());
+    }
+
+    #[test]
+    fn test_operation_deserialize_with_error() {
+        let json = r#"{
+            "id": "test-op-456",
+            "task_type": "retain",
+            "items_count": 3,
+            "document_id": null,
+            "created_at": "2024-01-15T10:00:00Z",
+            "status": "failed",
+            "error_message": "Something went wrong"
+        }"#;
+        let op: Operation = serde_json::from_str(json).unwrap();
+        assert_eq!(op.status, "failed");
+        assert_eq!(op.error_message, Some("Something went wrong".to_string()));
+    }
+
+    #[test]
+    fn test_memory_put_result_serialize() {
+        let result = MemoryPutResult {
+            success: true,
+            items_count: 10,
+            message: "Stored 10 memory units".to_string(),
+            is_async: true,
+            operation_id: Some("op-789".to_string()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"items_count\":10"));
+        assert!(json.contains("\"is_async\":true"));
+        assert!(json.contains("\"operation_id\":\"op-789\""));
+    }
+
+    #[test]
+    fn test_memory_put_result_without_operation_id() {
+        let result = MemoryPutResult {
+            success: true,
+            items_count: 5,
+            message: "Stored 5 memory units".to_string(),
+            is_async: false,
+            operation_id: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"operation_id\":null"));
+    }
+
+    #[test]
+    fn test_operations_response_deserialize() {
+        let json = r#"{
+            "bank_id": "test-bank",
+            "operations": [
+                {
+                    "id": "op-1",
+                    "task_type": "retain",
+                    "items_count": 2,
+                    "document_id": null,
+                    "created_at": "2024-01-15T10:00:00Z",
+                    "status": "pending",
+                    "error_message": null
+                },
+                {
+                    "id": "op-2",
+                    "task_type": "retain",
+                    "items_count": 3,
+                    "document_id": "doc-123",
+                    "created_at": "2024-01-15T11:00:00Z",
+                    "status": "completed",
+                    "error_message": null
+                }
+            ]
+        }"#;
+        let ops: OperationsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(ops.bank_id, "test-bank");
+        assert_eq!(ops.operations.len(), 2);
+        assert_eq!(ops.operations[0].status, "pending");
+        assert_eq!(ops.operations[1].status, "completed");
+    }
+}

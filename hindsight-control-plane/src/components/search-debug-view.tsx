@@ -5,6 +5,7 @@ import { client } from "@/lib/api";
 import { useBank } from "@/lib/bank-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
 import {
   Select,
   SelectContent,
@@ -25,13 +26,16 @@ import {
   FileText,
   Users,
   ArrowDown,
+  Tag,
+  Calendar,
 } from "lucide-react";
 import JsonView from "react18-json-view";
 import "react18-json-view/src/style.css";
 import { MemoryDetailPanel } from "./memory-detail-panel";
 
-type FactType = "world" | "experience" | "opinion";
+type FactType = "world" | "experience" | "observation";
 type Budget = "low" | "mid" | "high";
+type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
 type ViewMode = "results" | "trace" | "json";
 
 export function SearchDebugView() {
@@ -45,11 +49,14 @@ export function SearchDebugView() {
   const [queryDate, setQueryDate] = useState("");
   const [includeChunks, setIncludeChunks] = useState(false);
   const [includeEntities, setIncludeEntities] = useState(false);
+  const [tags, setTags] = useState("");
+  const [tagsMatch, setTagsMatch] = useState<TagsMatch>("any");
 
   // Results state
   const [results, setResults] = useState<any[] | null>(null);
   const [entities, setEntities] = useState<any[] | null>(null);
   const [chunks, setChunks] = useState<any[] | null>(null);
+  const [observations, setObservations] = useState<any[] | null>(null);
   const [trace, setTrace] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("results");
@@ -83,22 +90,43 @@ export function SearchDebugView() {
 
   const INITIAL_RESULTS_COUNT = 5;
 
+  // Helper to find full memory data from results when clicking trace items
+  const selectMemoryFromTrace = (traceResult: any) => {
+    const nodeId = traceResult.id || traceResult.node_id;
+    // Try to find the full result with all metadata
+    const fullResult = results?.find((r: any) => r.id === nodeId || r.node_id === nodeId);
+    setSelectedMemory(fullResult || traceResult);
+  };
+
   const runSearch = async () => {
     if (!currentBank) {
-      alert("Please select a memory bank first");
+      toast.error("Validation error", {
+        description: "Please select a memory bank first",
+      });
       return;
     }
 
-    if (!query || factTypes.length === 0) {
-      if (factTypes.length === 0) {
-        alert("Please select at least one fact type");
-      }
+    if (!query) {
+      return;
+    }
+
+    // Must select at least one type
+    if (factTypes.length === 0) {
+      toast.error("Validation error", {
+        description: "Please select at least one type (World, Experience, or Observations)",
+      });
       return;
     }
 
     setLoading(true);
 
     try {
+      // Parse tags from comma-separated string
+      const parsedTags = tags
+        .split(",")
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+
       const requestBody: any = {
         bank_id: currentBank,
         query: query,
@@ -111,6 +139,7 @@ export function SearchDebugView() {
           chunks: includeChunks ? { max_tokens: 8192 } : null,
         },
         ...(queryDate && { query_timestamp: queryDate }),
+        ...(parsedTags.length > 0 && { tags: parsedTags, tags_match: tagsMatch }),
       };
 
       const data: any = await client.recall(requestBody);
@@ -118,11 +147,11 @@ export function SearchDebugView() {
       setResults(data.results || []);
       setEntities(data.entities || null);
       setChunks(data.chunks || null);
+      setObservations(data.observations || null);
       setTrace(data.trace || null);
       setViewMode("results");
     } catch (error) {
-      console.error("Error running search:", error);
-      alert("Error running search: " + (error as Error).message);
+      // Error toast is shown automatically by the API client interceptor
     } finally {
       setLoading(false);
     }
@@ -172,7 +201,7 @@ export function SearchDebugView() {
             <div className="flex items-center gap-4">
               <span className="text-sm font-medium text-muted-foreground">Types:</span>
               <div className="flex gap-3">
-                {(["world", "experience", "opinion"] as FactType[]).map((ft) => (
+                {(["world", "experience"] as FactType[]).map((ft) => (
                   <label key={ft} className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
                       checked={factTypes.includes(ft)}
@@ -181,6 +210,13 @@ export function SearchDebugView() {
                     <span className="text-sm capitalize">{ft}</span>
                   </label>
                 ))}
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <Checkbox
+                    checked={factTypes.includes("observation")}
+                    onCheckedChange={() => toggleFactType("observation")}
+                  />
+                  <span className="text-sm">Observations</span>
+                </label>
               </div>
             </div>
 
@@ -246,6 +282,31 @@ export function SearchDebugView() {
               </label>
             </div>
           </div>
+
+          {/* Tags Filter */}
+          <div className="flex items-center gap-4 mt-4 pt-4 border-t">
+            <Tag className="h-4 w-4 text-muted-foreground" />
+            <div className="flex-1 max-w-md">
+              <Input
+                type="text"
+                value={tags}
+                onChange={(e) => setTags(e.target.value)}
+                placeholder="Filter by tags (comma-separated)"
+                className="h-8"
+              />
+            </div>
+            <Select value={tagsMatch} onValueChange={(v) => setTagsMatch(v as TagsMatch)}>
+              <SelectTrigger className="w-40 h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="any">Any (incl. untagged)</SelectItem>
+                <SelectItem value="all">All (incl. untagged)</SelectItem>
+                <SelectItem value="any_strict">Any (strict)</SelectItem>
+                <SelectItem value="all_strict">All (strict)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </CardContent>
       </Card>
 
@@ -302,55 +363,90 @@ export function SearchDebugView() {
 
           {/* Results View */}
           {viewMode === "results" && (
-            <div className="space-y-3">
-              {results.length === 0 ? (
-                <Card>
-                  <CardContent className="flex flex-col items-center justify-center py-12">
-                    <Search className="h-12 w-12 text-muted-foreground mb-4" />
-                    <p className="text-muted-foreground">No memories found for this query.</p>
+            <div className="space-y-4">
+              {/* Observations Section */}
+              {observations && observations.length > 0 && (
+                <Card className="border-orange-500/30 bg-orange-500/5">
+                  <CardHeader className="py-3">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <Database className="h-4 w-4 text-orange-500" />
+                      <span>Observations</span>
+                      <span className="text-xs text-muted-foreground">({observations.length})</span>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0 space-y-2">
+                    {observations.map((obs: any, idx: number) => (
+                      <div
+                        key={obs.id || idx}
+                        className="p-3 bg-background rounded-lg border border-orange-500/20"
+                      >
+                        <p className="text-sm text-foreground">{obs.text}</p>
+                        <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                          <span className="px-2 py-0.5 rounded bg-orange-500/10 text-orange-600">
+                            Observation
+                          </span>
+                          <span>Proof count: {obs.proof_count || 1}</span>
+                          <span>Relevance: {(obs.relevance || 0).toFixed(3)}</span>
+                        </div>
+                      </div>
+                    ))}
                   </CardContent>
                 </Card>
-              ) : (
-                results.map((result: any, idx: number) => {
-                  const visit = trace?.visits?.find((v: any) => v.node_id === result.id);
-                  const score = visit ? visit.weights.final_weight : result.score || 0;
-
-                  return (
-                    <Card
-                      key={idx}
-                      className="cursor-pointer hover:border-primary/50 transition-colors"
-                      onClick={() => setSelectedMemory(result)}
-                    >
-                      <CardContent className="py-4">
-                        <div className="flex items-start gap-4">
-                          <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-                            <span className="text-sm font-semibold text-primary">{idx + 1}</span>
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-foreground">{result.text}</p>
-                            <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
-                              <span className="px-2 py-0.5 rounded bg-muted capitalize">
-                                {result.type || "world"}
-                              </span>
-                              {result.context && (
-                                <span className="truncate max-w-xs">{result.context}</span>
-                              )}
-                              {result.occurred_start && (
-                                <span>{new Date(result.occurred_start).toLocaleDateString()}</span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex-shrink-0 text-right">
-                            <div className="text-sm font-semibold">{score.toFixed(3)}</div>
-                            <div className="text-xs text-muted-foreground">score</div>
-                          </div>
-                          <ChevronRight className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                        </div>
-                      </CardContent>
-                    </Card>
-                  );
-                })
               )}
+
+              {/* Memories Section */}
+              <div className="space-y-3">
+                {results.length === 0 && (!observations || observations.length === 0) ? (
+                  <Card>
+                    <CardContent className="flex flex-col items-center justify-center py-12">
+                      <Search className="h-12 w-12 text-muted-foreground mb-4" />
+                      <p className="text-muted-foreground">No memories found for this query.</p>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  results.map((result: any, idx: number) => {
+                    const visit = trace?.visits?.find((v: any) => v.node_id === result.id);
+                    const score = visit ? visit.weights.final_weight : result.score || 0;
+
+                    return (
+                      <Card
+                        key={idx}
+                        className="cursor-pointer hover:border-primary/50 transition-colors"
+                        onClick={() => setSelectedMemory(result)}
+                      >
+                        <CardContent className="py-4">
+                          <div className="flex items-start gap-4">
+                            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                              <span className="text-sm font-semibold text-primary">{idx + 1}</span>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-foreground">{result.text}</p>
+                              <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+                                <span className="px-2 py-0.5 rounded bg-muted capitalize">
+                                  {result.type || "world"}
+                                </span>
+                                {result.context && (
+                                  <span className="truncate max-w-xs">{result.context}</span>
+                                )}
+                                {result.occurred_start && (
+                                  <span>
+                                    {new Date(result.occurred_start).toLocaleDateString()}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex-shrink-0 text-right">
+                              <div className="text-sm font-semibold">{score.toFixed(3)}</div>
+                              <div className="text-xs text-muted-foreground">score</div>
+                            </div>
+                            <ChevronRight className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })
+                )}
+              </div>
             </div>
           )}
 
@@ -507,9 +603,29 @@ export function SearchDebugView() {
                                               }}
                                             >
                                               <div className="flex items-center justify-between mb-1">
-                                                <span className="font-medium text-sm text-foreground capitalize">
-                                                  {method.method_name}
-                                                </span>
+                                                <div className="flex items-center gap-2">
+                                                  <span className="font-medium text-sm text-foreground capitalize">
+                                                    {method.method_name}
+                                                  </span>
+                                                  {/* Show temporal range inline */}
+                                                  {method.method_name === "temporal" &&
+                                                    method.metadata?.constraint && (
+                                                      <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                                                        <Calendar className="h-3 w-3" />
+                                                        {method.metadata.constraint.start
+                                                          ? new Date(
+                                                              method.metadata.constraint.start
+                                                            ).toLocaleDateString()
+                                                          : "any"}
+                                                        {" → "}
+                                                        {method.metadata.constraint.end
+                                                          ? new Date(
+                                                              method.metadata.constraint.end
+                                                            ).toLocaleDateString()
+                                                          : "any"}
+                                                      </span>
+                                                    )}
+                                                </div>
                                                 {isMethodExpanded ? (
                                                   <ChevronDown className="h-3 w-3 text-muted-foreground" />
                                                 ) : (
@@ -546,7 +662,7 @@ export function SearchDebugView() {
                                                         className="p-2 bg-background rounded cursor-pointer hover:bg-muted/50 transition-colors border border-border"
                                                         onClick={(e) => {
                                                           e.stopPropagation();
-                                                          setSelectedMemory(r);
+                                                          selectMemoryFromTrace(r);
                                                         }}
                                                       >
                                                         <div className="flex items-start gap-2">
@@ -684,7 +800,7 @@ export function SearchDebugView() {
                                   className="p-3 bg-muted/30 rounded-lg cursor-pointer hover:bg-muted/50 transition-colors"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setSelectedMemory(r);
+                                    selectMemoryFromTrace(r);
                                   }}
                                 >
                                   <div className="flex items-start gap-3">
@@ -792,7 +908,7 @@ export function SearchDebugView() {
                                     className="p-3 bg-muted/30 rounded-lg cursor-pointer hover:bg-muted/50 transition-colors"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      setSelectedMemory(r);
+                                      selectMemoryFromTrace(r);
                                     }}
                                   >
                                     <div className="flex items-start gap-3">
@@ -898,6 +1014,7 @@ export function SearchDebugView() {
                       results,
                       ...(entities && { entities }),
                       ...(chunks && { chunks }),
+                      ...(observations && { observations }),
                       trace,
                     }}
                     collapsed={2}
@@ -931,6 +1048,7 @@ export function SearchDebugView() {
             memory={selectedMemory}
             onClose={() => setSelectedMemory(null)}
             inPanel
+            bankId={currentBank || undefined}
           />
         </div>
       )}

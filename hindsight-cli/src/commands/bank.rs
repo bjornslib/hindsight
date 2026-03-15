@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crate::api::ApiClient;
 use crate::output::{self, OutputFormat};
 use crate::ui;
@@ -201,7 +201,7 @@ pub fn update_background(
         Ok(profile) => {
             if output_format == OutputFormat::Pretty {
                 ui::print_success("Background updated successfully");
-                println!("\n{}", profile.background);
+                println!("\n{}", profile.mission);
 
                 if !no_update_disposition {
                     if let (Some(old_p), Some(new_p)) =
@@ -219,6 +219,228 @@ pub fn update_background(
             Ok(())
         }
         Err(e) => Err(e)
+    }
+}
+
+/// Set bank mission
+pub fn mission(
+    client: &ApiClient,
+    bank_id: &str,
+    mission_text: &str,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Setting mission..."))
+    } else {
+        None
+    };
+
+    let response = client.set_mission(bank_id, mission_text, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(profile) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_success("Mission updated successfully");
+                println!();
+                println!("{}", profile.mission);
+            } else {
+                output::print_output(&profile, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Create a new bank
+pub fn create(
+    client: &ApiClient,
+    bank_id: &str,
+    name: Option<String>,
+    mission_text: Option<String>,
+    skepticism: Option<i64>,
+    literalism: Option<i64>,
+    empathy: Option<i64>,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Creating bank..."))
+    } else {
+        None
+    };
+
+    use hindsight_client::types;
+    use std::num::NonZeroU64;
+
+    let disposition = if skepticism.is_some() || literalism.is_some() || empathy.is_some() {
+        Some(types::DispositionTraits {
+            skepticism: NonZeroU64::new(skepticism.unwrap_or(3) as u64).unwrap(),
+            literalism: NonZeroU64::new(literalism.unwrap_or(3) as u64).unwrap(),
+            empathy: NonZeroU64::new(empathy.unwrap_or(3) as u64).unwrap(),
+        })
+    } else {
+        None
+    };
+
+    let request = types::CreateBankRequest {
+        name,
+        mission: mission_text,
+        background: None,
+        disposition,
+        ..Default::default()
+    };
+
+    let response = client.create_bank(bank_id, &request, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(profile) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_success(&format!("Bank '{}' created successfully", bank_id));
+                println!();
+                ui::print_disposition(&profile);
+            } else {
+                output::print_output(&profile, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Update bank properties (partial update)
+pub fn update(
+    client: &ApiClient,
+    bank_id: &str,
+    name: Option<String>,
+    mission_text: Option<String>,
+    skepticism: Option<i64>,
+    literalism: Option<i64>,
+    empathy: Option<i64>,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    if name.is_none() && mission_text.is_none() && skepticism.is_none() && literalism.is_none() && empathy.is_none() {
+        anyhow::bail!("At least one field must be provided (--name, --mission, --skepticism, --literalism, --empathy)");
+    }
+
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Updating bank..."))
+    } else {
+        None
+    };
+
+    use hindsight_client::types;
+    use std::num::NonZeroU64;
+
+    let disposition = if skepticism.is_some() || literalism.is_some() || empathy.is_some() {
+        Some(types::DispositionTraits {
+            skepticism: NonZeroU64::new(skepticism.unwrap_or(3) as u64).unwrap(),
+            literalism: NonZeroU64::new(literalism.unwrap_or(3) as u64).unwrap(),
+            empathy: NonZeroU64::new(empathy.unwrap_or(3) as u64).unwrap(),
+        })
+    } else {
+        None
+    };
+
+    let request = types::CreateBankRequest {
+        name,
+        mission: mission_text,
+        background: None,
+        disposition,
+        ..Default::default()
+    };
+
+    let response = client.update_bank(bank_id, &request, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(profile) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_success(&format!("Bank '{}' updated successfully", bank_id));
+                println!();
+                ui::print_disposition(&profile);
+            } else {
+                output::print_output(&profile, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Get memory graph data
+pub fn graph(
+    client: &ApiClient,
+    bank_id: &str,
+    type_filter: Option<String>,
+    limit: i64,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Fetching graph data..."))
+    } else {
+        None
+    };
+
+    let response = client.get_graph(bank_id, type_filter.as_deref(), Some(limit), verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(result) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_section_header(&format!("Memory Graph: {}", bank_id));
+
+                println!("  {} {}", ui::dim("Nodes:"), ui::gradient_start(&result.nodes.len().to_string()));
+                println!("  {} {}", ui::dim("Edges:"), ui::gradient_end(&result.edges.len().to_string()));
+                println!();
+
+                // Show sample of nodes
+                if !result.nodes.is_empty() {
+                    println!("{}", ui::gradient_text("─── Sample Nodes ───"));
+                    for node in result.nodes.iter().take(5) {
+                        let fact_type = node.get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let id = node.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        println!("  {} [{}]", ui::dim(id), fact_type);
+                        if let Some(text) = node.get("text").and_then(|v| v.as_str()) {
+                            let preview: String = text.chars().take(60).collect();
+                            let ellipsis = if text.len() > 60 { "..." } else { "" };
+                            println!("    {}{}", preview, ellipsis);
+                        }
+                    }
+                    if result.nodes.len() > 5 {
+                        println!("  {} more...", ui::dim(&format!("+ {}", result.nodes.len() - 5)));
+                    }
+                    println!();
+                }
+
+                println!("{}", ui::dim("Use JSON output for full graph data: -o json"));
+            } else {
+                output::print_output(&result, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -273,5 +495,321 @@ pub fn delete(
             Ok(())
         }
         Err(e) => Err(e)
+    }
+}
+
+/// Trigger consolidation to create/update observations
+pub fn consolidate(
+    client: &ApiClient,
+    bank_id: &str,
+    wait: bool,
+    poll_interval: u64,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Triggering consolidation..."))
+    } else {
+        None
+    };
+
+    let response = client.trigger_consolidation(bank_id, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(result) => {
+            let operation_id = result.operation_id.clone();
+
+            if output_format == OutputFormat::Pretty {
+                ui::print_success("Consolidation triggered");
+                println!("  {} {}", ui::dim("Operation ID:"), operation_id);
+                if result.deduplicated {
+                    println!("  {} {}", ui::dim("Note:"), "Reusing existing pending consolidation task");
+                }
+            } else {
+                output::print_output(&result, output_format)?;
+            }
+
+            if !wait {
+                if output_format == OutputFormat::Pretty {
+                    println!();
+                    println!("{}", ui::dim("Use --wait to poll for completion, or 'hindsight operation get' to check status."));
+                }
+                return Ok(());
+            }
+
+            // Poll for completion
+            if output_format == OutputFormat::Pretty {
+                println!();
+                println!("{}", ui::dim(&format!("Polling every {}s for completion...", poll_interval)));
+            }
+
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(poll_interval));
+                let elapsed = start.elapsed().as_secs();
+
+                let ops_result = client.list_operations(bank_id, verbose);
+                match ops_result {
+                    Ok(ops) => {
+                        // Find the operation by ID
+                        let op = ops.operations.iter().find(|o| o.id == operation_id);
+
+                        match op.map(|o| o.status.as_str()) {
+                            Some("completed") => {
+                                if output_format == OutputFormat::Pretty {
+                                    ui::print_success(&format!("Consolidation completed ({}s)", elapsed));
+                                }
+                                break;
+                            }
+                            Some("failed") => {
+                                let error_msg = op
+                                    .and_then(|o| o.error_message.as_ref())
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("Unknown error");
+                                if output_format == OutputFormat::Pretty {
+                                    ui::print_error(&format!("Consolidation failed: {}", error_msg));
+                                }
+                                std::process::exit(1);
+                            }
+                            Some(status) => {
+                                if output_format == OutputFormat::Pretty {
+                                    println!("  ⏳ {} ({}s elapsed)", status, elapsed);
+                                }
+                            }
+                            None => {
+                                if output_format == OutputFormat::Pretty {
+                                    ui::print_warning(&format!("Operation {} not found in list", operation_id));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if output_format == OutputFormat::Pretty {
+                            ui::print_error(&format!("Failed to check operation status: {}", e));
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Clear all observations for a bank
+pub fn clear_observations(
+    client: &ApiClient,
+    bank_id: &str,
+    yes: bool,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    // Confirmation prompt unless -y flag is used
+    if !yes && output_format == OutputFormat::Pretty {
+        let message = format!(
+            "Are you sure you want to clear all observations for bank '{}'? This cannot be undone.",
+            bank_id
+        );
+
+        let confirmed = ui::prompt_confirmation(&message)?;
+
+        if !confirmed {
+            ui::print_info("Operation cancelled");
+            return Ok(());
+        }
+    }
+
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Clearing observations..."))
+    } else {
+        None
+    };
+
+    let response = client.clear_observations(bank_id, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(result) => {
+            if output_format == OutputFormat::Pretty {
+                if result.success {
+                    ui::print_success(&format!("Observations cleared for bank '{}'", bank_id));
+                    if let Some(count) = result.deleted_count {
+                        println!("  Observations deleted: {}", count);
+                    }
+                } else {
+                    ui::print_error("Failed to clear observations");
+                }
+            } else {
+                output::print_output(&result, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn config(
+    client: &ApiClient,
+    bank_id: &str,
+    overrides_only: bool,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Fetching bank configuration..."))
+    } else {
+        None
+    };
+
+    let response = client.get_bank_config(bank_id, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(result) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_success(&format!("Configuration for bank '{}'", bank_id));
+                println!();
+                if overrides_only {
+                    println!("Bank-specific overrides:");
+                    if result.overrides.is_empty() {
+                        println!("  (none - using defaults)");
+                    } else {
+                        for (key, value) in result.overrides.iter() {
+                            println!("  {}: {:?}", key, value);
+                        }
+                    }
+                } else {
+                    println!("Resolved configuration (with all overrides applied):");
+                    for (key, value) in result.config.iter() {
+                        println!("  {}: {:?}", key, value);
+                    }
+                }
+            } else {
+                if overrides_only {
+                    output::print_output(&result.overrides, output_format)?;
+                } else {
+                    output::print_output(&result, output_format)?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn set_config(
+    client: &ApiClient,
+    bank_id: &str,
+    llm_provider: Option<String>,
+    llm_model: Option<String>,
+    llm_api_key: Option<String>,
+    llm_base_url: Option<String>,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    use std::collections::HashMap;
+
+    let mut updates: HashMap<String, serde_json::Value> = HashMap::new();
+
+    if let Some(provider) = llm_provider {
+        updates.insert("llm_provider".to_string(), serde_json::Value::String(provider));
+    }
+    if let Some(model) = llm_model {
+        updates.insert("llm_model".to_string(), serde_json::Value::String(model));
+    }
+    if let Some(api_key) = llm_api_key {
+        updates.insert("llm_api_key".to_string(), serde_json::Value::String(api_key));
+    }
+    if let Some(base_url) = llm_base_url {
+        updates.insert("llm_base_url".to_string(), serde_json::Value::String(base_url));
+    }
+
+    if updates.is_empty() {
+        return Err(anyhow!("No config updates provided. Use --llm-provider, --llm-model, --llm-api-key, or --llm-base-url".to_string()));
+    }
+
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Updating bank configuration..."))
+    } else {
+        None
+    };
+
+    let response = client.update_bank_config(bank_id, updates, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(result) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_success(&format!("Configuration updated for bank '{}'", bank_id));
+                println!("\nUpdated overrides:");
+                for (key, value) in result.overrides.iter() {
+                    println!("  {}: {:?}", key, value);
+                }
+            } else {
+                output::print_output(&result, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn reset_config(
+    client: &ApiClient,
+    bank_id: &str,
+    yes: bool,
+    verbose: bool,
+    output_format: OutputFormat,
+) -> Result<()> {
+    if !yes && output_format == OutputFormat::Pretty {
+        let confirmed = ui::prompt_confirmation(&format!(
+            "Reset all configuration overrides for bank '{}'?",
+            bank_id
+        ))?;
+
+        if !confirmed {
+            ui::print_info("Operation cancelled");
+            return Ok(());
+        }
+    }
+
+    let spinner = if output_format == OutputFormat::Pretty {
+        Some(ui::create_spinner("Resetting bank configuration..."))
+    } else {
+        None
+    };
+
+    let response = client.reset_bank_config(bank_id, verbose);
+
+    if let Some(mut sp) = spinner {
+        sp.finish();
+    }
+
+    match response {
+        Ok(result) => {
+            if output_format == OutputFormat::Pretty {
+                ui::print_success(&format!("Configuration reset to defaults for bank '{}'", bank_id));
+            } else {
+                output::print_output(&result, output_format)?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }

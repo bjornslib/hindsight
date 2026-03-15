@@ -67,11 +67,11 @@ fn get_before_help() -> &'static str {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Manage banks (list, profile, stats)
+    /// Manage banks (list, create, update, profile, stats, mission, graph, delete)
     #[command(subcommand)]
     Bank(BankCommands),
 
-    /// Manage memories (recall, reflect, retain, delete)
+    /// Manage memories (list, get, recall, reflect, retain, clear)
     #[command(subcommand)]
     Memory(MemoryCommands),
 
@@ -83,9 +83,34 @@ enum Commands {
     #[command(subcommand)]
     Entity(EntityCommands),
 
-    /// Manage async operations (list, cancel)
+    /// Manage tags (list)
+    #[command(subcommand)]
+    Tag(TagCommands),
+
+    /// Manage chunks (get)
+    #[command(subcommand)]
+    Chunk(ChunkCommands),
+
+    /// Manage async operations (list, get, cancel)
     #[command(subcommand)]
     Operation(OperationCommands),
+
+    /// Manage mental models (user-curated summaries)
+    #[command(subcommand)]
+    MentalModel(MentalModelCommands),
+
+    /// Manage directives (behavioral rules)
+    #[command(subcommand)]
+    Directive(DirectiveCommands),
+
+    /// Check API health status
+    Health,
+
+    /// Get Prometheus metrics
+    Metrics,
+
+    /// Get API version information
+    Version,
 
     /// Interactive TUI explorer (k9s-style) for navigating banks, memories, entities, and performing recall/reflect
     #[command(alias = "tui")]
@@ -111,7 +136,59 @@ enum BankCommands {
     /// List all banks
     List,
 
-    /// Get bank disposition and background
+    /// Create a new bank
+    Create {
+        /// Bank ID
+        bank_id: String,
+
+        /// Bank name
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+
+        /// Mission statement
+        #[arg(short = 'm', long)]
+        mission: Option<String>,
+
+        /// Skepticism trait (1-5)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=5))]
+        skepticism: Option<i64>,
+
+        /// Literalism trait (1-5)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=5))]
+        literalism: Option<i64>,
+
+        /// Empathy trait (1-5)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=5))]
+        empathy: Option<i64>,
+    },
+
+    /// Update bank properties (partial update)
+    Update {
+        /// Bank ID
+        bank_id: String,
+
+        /// Bank name
+        #[arg(short = 'n', long)]
+        name: Option<String>,
+
+        /// Mission statement
+        #[arg(short = 'm', long)]
+        mission: Option<String>,
+
+        /// Skepticism trait (1-5)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=5))]
+        skepticism: Option<i64>,
+
+        /// Literalism trait (1-5)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=5))]
+        literalism: Option<i64>,
+
+        /// Empathy trait (1-5)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(1..=5))]
+        empathy: Option<i64>,
+    },
+
+    /// Get bank disposition and profile
     Disposition {
         /// Bank ID
         bank_id: String,
@@ -132,7 +209,17 @@ enum BankCommands {
         name: String,
     },
 
-    /// Set or merge bank background
+    /// Set bank mission
+    Mission {
+        /// Bank ID
+        bank_id: String,
+
+        /// Mission statement
+        mission: String,
+    },
+
+    /// Set or merge bank background (deprecated: use mission instead)
+    #[command(hide = true)]
     Background {
         /// Bank ID
         bank_id: String,
@@ -145,8 +232,88 @@ enum BankCommands {
         no_update_disposition: bool,
     },
 
+    /// Get memory graph data
+    Graph {
+        /// Bank ID
+        bank_id: String,
+
+        /// Filter by fact type (world, experience, opinion)
+        #[arg(short = 't', long)]
+        fact_type: Option<String>,
+
+        /// Maximum nodes to return
+        #[arg(short = 'l', long, default_value = "1000")]
+        limit: i64,
+    },
+
     /// Delete a bank and all its data
     Delete {
+        /// Bank ID
+        bank_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Trigger consolidation to create/update observations
+    Consolidate {
+        /// Bank ID
+        bank_id: String,
+
+        /// Wait for consolidation to complete (poll for status)
+        #[arg(long)]
+        wait: bool,
+
+        /// Poll interval in seconds (only used with --wait)
+        #[arg(long, default_value = "10")]
+        poll_interval: u64,
+    },
+
+    /// Clear all observations for a bank
+    ClearObservations {
+        /// Bank ID
+        bank_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Get bank configuration (hierarchical overrides)
+    Config {
+        /// Bank ID
+        bank_id: String,
+
+        /// Show only bank-specific overrides (not full resolved config)
+        #[arg(long)]
+        overrides_only: bool,
+    },
+
+    /// Update bank configuration (set hierarchical overrides)
+    SetConfig {
+        /// Bank ID
+        bank_id: String,
+
+        /// LLM provider override
+        #[arg(long)]
+        llm_provider: Option<String>,
+
+        /// LLM model override
+        #[arg(long)]
+        llm_model: Option<String>,
+
+        /// LLM API key override
+        #[arg(long)]
+        llm_api_key: Option<String>,
+
+        /// LLM base URL override
+        #[arg(long)]
+        llm_base_url: Option<String>,
+    },
+
+    /// Reset bank configuration to defaults (remove all overrides)
+    ResetConfig {
         /// Bank ID
         bank_id: String,
 
@@ -158,6 +325,37 @@ enum BankCommands {
 
 #[derive(Subcommand)]
 enum MemoryCommands {
+    /// List memory units with pagination
+    List {
+        /// Bank ID
+        bank_id: String,
+
+        /// Filter by fact type (world, experience, opinion)
+        #[arg(short = 't', long)]
+        fact_type: Option<String>,
+
+        /// Full-text search query
+        #[arg(short = 'q', long)]
+        query: Option<String>,
+
+        /// Maximum number of results
+        #[arg(short = 'l', long, default_value = "100")]
+        limit: i64,
+
+        /// Offset for pagination
+        #[arg(short = 's', long, default_value = "0")]
+        offset: i64,
+    },
+
+    /// Get a specific memory unit by ID
+    Get {
+        /// Bank ID
+        bank_id: String,
+
+        /// Memory unit ID
+        memory_id: String,
+    },
+
     /// Recall memories using semantic search
     Recall {
         /// Bank ID
@@ -206,6 +404,14 @@ enum MemoryCommands {
         /// Additional context
         #[arg(short = 'c', long)]
         context: Option<String>,
+
+        /// Maximum tokens for the response (server default: 4096)
+        #[arg(short = 'm', long)]
+        max_tokens: Option<i64>,
+
+        /// Path to JSON schema file for structured output
+        #[arg(short = 's', long)]
+        schema: Option<PathBuf>,
     },
 
     /// Store (retain) a single memory
@@ -285,6 +491,10 @@ enum DocumentCommands {
         #[arg(short = 'q', long)]
         query: Option<String>,
 
+        /// Filter by date (yesterday, today, YYYY-MM-DD, or all)
+        #[arg(short = 'd', long)]
+        date: Option<String>,
+
         /// Maximum number of results
         #[arg(short = 'l', long, default_value = "100")]
         limit: i32,
@@ -352,6 +562,15 @@ enum OperationCommands {
         bank_id: String,
     },
 
+    /// Get the status of a specific operation
+    Get {
+        /// Bank ID
+        bank_id: String,
+
+        /// Operation ID
+        operation_id: String,
+    },
+
     /// Cancel a pending async operation
     Cancel {
         /// Bank ID
@@ -359,6 +578,165 @@ enum OperationCommands {
 
         /// Operation ID
         operation_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TagCommands {
+    /// List tags in a bank
+    List {
+        /// Bank ID
+        bank_id: String,
+
+        /// Wildcard search query (e.g., 'user:*')
+        #[arg(short = 'q', long)]
+        query: Option<String>,
+
+        /// Maximum number of results
+        #[arg(short = 'l', long, default_value = "100")]
+        limit: i64,
+
+        /// Offset for pagination
+        #[arg(short = 's', long, default_value = "0")]
+        offset: i64,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChunkCommands {
+    /// Get a specific chunk by ID
+    Get {
+        /// Chunk ID
+        chunk_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MentalModelCommands {
+    /// List mental models for a bank
+    List {
+        /// Bank ID
+        bank_id: String,
+    },
+
+    /// Get a specific mental model
+    Get {
+        /// Bank ID
+        bank_id: String,
+
+        /// Mental model ID
+        mental_model_id: String,
+    },
+
+    /// Create a new mental model
+    Create {
+        /// Bank ID
+        bank_id: String,
+
+        /// Mental model name
+        name: String,
+
+        /// Source query to generate the mental model from
+        source_query: String,
+
+        /// Optional custom ID for the mental model (alphanumeric lowercase with hyphens)
+        #[arg(long)]
+        id: Option<String>,
+    },
+
+    /// Update a mental model
+    Update {
+        /// Bank ID
+        bank_id: String,
+
+        /// Mental model ID
+        mental_model_id: String,
+
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Delete a mental model
+    Delete {
+        /// Bank ID
+        bank_id: String,
+
+        /// Mental model ID
+        mental_model_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// Refresh a mental model (re-run the source query)
+    Refresh {
+        /// Bank ID
+        bank_id: String,
+
+        /// Mental model ID
+        mental_model_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DirectiveCommands {
+    /// List directives for a bank
+    List {
+        /// Bank ID
+        bank_id: String,
+    },
+
+    /// Get a specific directive
+    Get {
+        /// Bank ID
+        bank_id: String,
+
+        /// Directive ID
+        directive_id: String,
+    },
+
+    /// Create a new directive
+    Create {
+        /// Bank ID
+        bank_id: String,
+
+        /// Directive name
+        name: String,
+
+        /// Directive content (the text to inject into prompts)
+        content: String,
+    },
+
+    /// Update a directive
+    Update {
+        /// Bank ID
+        bank_id: String,
+
+        /// Directive ID
+        directive_id: String,
+
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// New content
+        #[arg(long)]
+        content: Option<String>,
+    },
+
+    /// Delete a directive
+    Delete {
+        /// Bank ID
+        bank_id: String,
+
+        /// Directive ID
+        directive_id: String,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 
@@ -404,25 +782,66 @@ fn run() -> Result<()> {
         Commands::Configure { .. } => unreachable!(), // Handled above
         Commands::Ui => unreachable!(), // Handled above
         Commands::Explore => commands::explore::run(&client),
+
+        // Health, Metrics, and Version
+        Commands::Health => commands::health::health(&client, verbose, output_format),
+        Commands::Metrics => commands::health::metrics(&client, verbose, output_format),
+        Commands::Version => commands::health::version(&client, verbose, output_format),
+
+        // Bank commands
         Commands::Bank(bank_cmd) => match bank_cmd {
             BankCommands::List => commands::bank::list(&client, verbose, output_format),
+            BankCommands::Create { bank_id, name, mission, skepticism, literalism, empathy } => {
+                commands::bank::create(&client, &bank_id, name, mission, skepticism, literalism, empathy, verbose, output_format)
+            }
+            BankCommands::Update { bank_id, name, mission, skepticism, literalism, empathy } => {
+                commands::bank::update(&client, &bank_id, name, mission, skepticism, literalism, empathy, verbose, output_format)
+            }
             BankCommands::Disposition { bank_id } => commands::bank::disposition(&client, &bank_id, verbose, output_format),
             BankCommands::Stats { bank_id } => commands::bank::stats(&client, &bank_id, verbose, output_format),
             BankCommands::Name { bank_id, name } => commands::bank::update_name(&client, &bank_id, &name, verbose, output_format),
+            BankCommands::Mission { bank_id, mission } => {
+                commands::bank::mission(&client, &bank_id, &mission, verbose, output_format)
+            }
             BankCommands::Background { bank_id, content, no_update_disposition } => {
                 commands::bank::update_background(&client, &bank_id, &content, no_update_disposition, verbose, output_format)
+            }
+            BankCommands::Graph { bank_id, fact_type, limit } => {
+                commands::bank::graph(&client, &bank_id, fact_type, limit, verbose, output_format)
             }
             BankCommands::Delete { bank_id, yes } => {
                 commands::bank::delete(&client, &bank_id, yes, verbose, output_format)
             }
+            BankCommands::Consolidate { bank_id, wait, poll_interval } => {
+                commands::bank::consolidate(&client, &bank_id, wait, poll_interval, verbose, output_format)
+            }
+            BankCommands::ClearObservations { bank_id, yes } => {
+                commands::bank::clear_observations(&client, &bank_id, yes, verbose, output_format)
+            }
+            BankCommands::Config { bank_id, overrides_only } => {
+                commands::bank::config(&client, &bank_id, overrides_only, verbose, output_format)
+            }
+            BankCommands::SetConfig { bank_id, llm_provider, llm_model, llm_api_key, llm_base_url } => {
+                commands::bank::set_config(&client, &bank_id, llm_provider, llm_model, llm_api_key, llm_base_url, verbose, output_format)
+            }
+            BankCommands::ResetConfig { bank_id, yes } => {
+                commands::bank::reset_config(&client, &bank_id, yes, verbose, output_format)
+            }
         },
 
+        // Memory commands
         Commands::Memory(memory_cmd) => match memory_cmd {
+            MemoryCommands::List { bank_id, fact_type, query, limit, offset } => {
+                commands::memory::list(&client, &bank_id, fact_type, query, limit, offset, verbose, output_format)
+            }
+            MemoryCommands::Get { bank_id, memory_id } => {
+                commands::memory::get(&client, &bank_id, &memory_id, verbose, output_format)
+            }
             MemoryCommands::Recall { bank_id, query, fact_type, budget, max_tokens, trace, include_chunks, chunk_max_tokens } => {
                 commands::memory::recall(&client, &bank_id, query, fact_type, budget, max_tokens, trace, include_chunks, chunk_max_tokens, verbose, output_format)
             }
-            MemoryCommands::Reflect { bank_id, query, budget, context } => {
-                commands::memory::reflect(&client, &bank_id, query, budget, context, verbose, output_format)
+            MemoryCommands::Reflect { bank_id, query, budget, context, max_tokens, schema } => {
+                commands::memory::reflect(&client, &bank_id, query, budget, context, max_tokens, schema, verbose, output_format)
             }
             MemoryCommands::Retain { bank_id, content, doc_id, context, r#async } => {
                 commands::memory::retain(&client, &bank_id, content, doc_id, context, r#async, verbose, output_format)
@@ -438,9 +857,10 @@ fn run() -> Result<()> {
             }
         },
 
+        // Document commands
         Commands::Document(doc_cmd) => match doc_cmd {
-            DocumentCommands::List { bank_id, query, limit, offset } => {
-                commands::document::list(&client, &bank_id, query, limit, offset, verbose, output_format)
+            DocumentCommands::List { bank_id, query, date, limit, offset } => {
+                commands::document::list(&client, &bank_id, query, date, limit, offset, verbose, output_format)
             }
             DocumentCommands::Get { bank_id, document_id } => {
                 commands::document::get(&client, &bank_id, &document_id, verbose, output_format)
@@ -450,6 +870,7 @@ fn run() -> Result<()> {
             }
         },
 
+        // Entity commands
         Commands::Entity(entity_cmd) => match entity_cmd {
             EntityCommands::List { bank_id, limit } => {
                 commands::entity::list(&client, &bank_id, limit, verbose, output_format)
@@ -462,12 +883,71 @@ fn run() -> Result<()> {
             }
         },
 
+        // Tag commands
+        Commands::Tag(tag_cmd) => match tag_cmd {
+            TagCommands::List { bank_id, query, limit, offset } => {
+                commands::tag::list(&client, &bank_id, query, limit, offset, verbose, output_format)
+            }
+        },
+
+        // Chunk commands
+        Commands::Chunk(chunk_cmd) => match chunk_cmd {
+            ChunkCommands::Get { chunk_id } => {
+                commands::chunk::get(&client, &chunk_id, verbose, output_format)
+            }
+        },
+
+        // Operation commands
         Commands::Operation(op_cmd) => match op_cmd {
             OperationCommands::List { bank_id } => {
                 commands::operation::list(&client, &bank_id, verbose, output_format)
             }
+            OperationCommands::Get { bank_id, operation_id } => {
+                commands::operation::get(&client, &bank_id, &operation_id, verbose, output_format)
+            }
             OperationCommands::Cancel { bank_id, operation_id } => {
                 commands::operation::cancel(&client, &bank_id, &operation_id, verbose, output_format)
+            }
+        },
+
+        // Mental model commands
+        Commands::MentalModel(mm_cmd) => match mm_cmd {
+            MentalModelCommands::List { bank_id } => {
+                commands::mental_model::list(&client, &bank_id, verbose, output_format)
+            }
+            MentalModelCommands::Get { bank_id, mental_model_id } => {
+                commands::mental_model::get(&client, &bank_id, &mental_model_id, verbose, output_format)
+            }
+            MentalModelCommands::Create { bank_id, name, source_query, id } => {
+                commands::mental_model::create(&client, &bank_id, &name, &source_query, id.as_deref(), verbose, output_format)
+            }
+            MentalModelCommands::Update { bank_id, mental_model_id, name } => {
+                commands::mental_model::update(&client, &bank_id, &mental_model_id, name, verbose, output_format)
+            }
+            MentalModelCommands::Delete { bank_id, mental_model_id, yes } => {
+                commands::mental_model::delete(&client, &bank_id, &mental_model_id, yes, verbose, output_format)
+            }
+            MentalModelCommands::Refresh { bank_id, mental_model_id } => {
+                commands::mental_model::refresh(&client, &bank_id, &mental_model_id, verbose, output_format)
+            }
+        },
+
+        // Directive commands
+        Commands::Directive(dir_cmd) => match dir_cmd {
+            DirectiveCommands::List { bank_id } => {
+                commands::directive::list(&client, &bank_id, verbose, output_format)
+            }
+            DirectiveCommands::Get { bank_id, directive_id } => {
+                commands::directive::get(&client, &bank_id, &directive_id, verbose, output_format)
+            }
+            DirectiveCommands::Create { bank_id, name, content } => {
+                commands::directive::create(&client, &bank_id, &name, &content, verbose, output_format)
+            }
+            DirectiveCommands::Update { bank_id, directive_id, name, content } => {
+                commands::directive::update(&client, &bank_id, &directive_id, name, content, verbose, output_format)
+            }
+            DirectiveCommands::Delete { bank_id, directive_id, yes } => {
+                commands::directive::delete(&client, &bank_id, &directive_id, yes, verbose, output_format)
             }
         },
     };

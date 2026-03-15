@@ -24,6 +24,9 @@ from hindsight_api.extensions import (
     TenantExtension,
     ValidationResult,
     load_extension,
+    # Consolidation operation
+    ConsolidateContext,
+    ConsolidateResult,
 )
 
 
@@ -128,14 +131,18 @@ class TrackingValidator(OperationValidatorExtension):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        # Pre-hook tracking
+        # Pre-hook tracking - Core operations
         self.pre_retain_calls: list[RetainContext] = []
         self.pre_recall_calls: list[RecallContext] = []
         self.pre_reflect_calls: list[ReflectContext] = []
-        # Post-hook tracking
+        # Post-hook tracking - Core operations
         self.post_retain_calls: list[RetainResult] = []
         self.post_recall_calls: list[RecallResult] = []
         self.post_reflect_calls: list[ReflectResultContext] = []
+        # Pre-hook tracking - Consolidation
+        self.pre_consolidate_calls: list[ConsolidateContext] = []
+        # Post-hook tracking - Consolidation
+        self.post_consolidate_calls: list[ConsolidateResult] = []
 
     async def validate_retain(self, ctx: RetainContext) -> ValidationResult:
         self.pre_retain_calls.append(ctx)
@@ -157,6 +164,14 @@ class TrackingValidator(OperationValidatorExtension):
 
     async def on_reflect_complete(self, result: ReflectResultContext) -> None:
         self.post_reflect_calls.append(result)
+
+    # Consolidation hooks
+    async def validate_consolidate(self, ctx: ConsolidateContext) -> ValidationResult:
+        self.pre_consolidate_calls.append(ctx)
+        return ValidationResult.accept()
+
+    async def on_consolidate_complete(self, result: ConsolidateResult) -> None:
+        self.post_consolidate_calls.append(result)
 
 
 class TestMemoryEngineValidation:
@@ -338,6 +353,14 @@ class TestOperationHooksParameters:
         assert post_result.error is None
         assert post_result.unit_ids == result  # Should match the return value
 
+        # Verify actual LLM token usage is populated
+        assert post_result.llm_input_tokens is not None
+        assert post_result.llm_input_tokens > 0
+        assert post_result.llm_output_tokens is not None
+        assert post_result.llm_output_tokens > 0
+        assert post_result.llm_total_tokens is not None
+        assert post_result.llm_total_tokens == post_result.llm_input_tokens + post_result.llm_output_tokens
+
     @pytest.mark.asyncio
     async def test_recall_pre_hook_receives_all_parameters(self, memory_with_tracking_validator):
         """Pre-recall hook receives all user-provided parameters."""
@@ -512,8 +535,9 @@ class TestOperationHooksParameters:
             request_context=ctx,
         )
 
-        assert len(validator.pre_recall_calls) == 1
-        assert len(validator.post_recall_calls) == 1
+        # Use >= 1 since consolidation may trigger internal recall calls when observations are enabled
+        assert len(validator.pre_recall_calls) >= 1
+        assert len(validator.post_recall_calls) >= 1
 
 
 class TestTenantExtension:

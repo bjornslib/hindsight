@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -e
 
-# Script to generate Python and TypeScript clients from OpenAPI spec using openapi-generator
+# Script to generate Python, TypeScript, and Go clients from OpenAPI spec
 # Note: Rust client is auto-generated at build time via build.rs (uses progenitor)
 # Usage: ./scripts/generate-clients.sh
+
+# Pin openapi-generator version for reproducible builds across local and CI
+OPENAPI_GENERATOR_VERSION="v7.10.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLIENTS_DIR="$PROJECT_ROOT/hindsight-clients"
-OPENAPI_SPEC="$PROJECT_ROOT/openapi.json"
+OPENAPI_SPEC="$PROJECT_ROOT/hindsight-docs/static/openapi.json"
 
 echo "=================================================="
 echo "Hindsight API Client Generator"
@@ -21,6 +24,7 @@ echo "This script generates clients for:"
 echo "  - Rust (via progenitor in build.rs)"
 echo "  - Python (via openapi-generator)"
 echo "  - TypeScript (via @hey-api/openapi-ts)"
+echo "  - Go (via ogen)"
 echo ""
 
 # Check if OpenAPI spec exists
@@ -38,6 +42,7 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 echo "✓ Docker available"
+echo "✓ Using openapi-generator ${OPENAPI_GENERATOR_VERSION}"
 echo ""
 
 # Generate Rust client
@@ -47,16 +52,16 @@ echo "=================================================="
 
 RUST_CLIENT_DIR="$CLIENTS_DIR/rust"
 
-# Clean old generated files
+# Clean old generated files (keep Cargo.lock for reproducible builds)
 echo "Cleaning old Rust generated code..."
 rm -rf "$RUST_CLIENT_DIR/target"
-rm -f "$RUST_CLIENT_DIR/Cargo.lock"
 
 # Trigger regeneration by building
+# Use --locked to ensure reproducible builds from committed Cargo.lock
 echo "Regenerating Rust client (via build.rs)..."
 cd "$RUST_CLIENT_DIR"
 cargo clean
-cargo build --release
+cargo build --release --locked
 
 echo "✓ Rust client generated at $RUST_CLIENT_DIR"
 echo ""
@@ -100,12 +105,16 @@ done
 echo "Generating new client with openapi-generator..."
 cd "$PYTHON_CLIENT_DIR"
 
-# Run openapi-generator via Docker
+# Run openapi-generator via Docker (pinned version for reproducibility)
+# Use --platform linux/amd64 to ensure identical output on both macOS (arm64) and Linux CI (amd64)
+# Use --user to match current user's UID/GID so generated files are writable
 docker run --rm \
+    --platform linux/amd64 \
+    --user "$(id -u):$(id -g)" \
     -v "$OPENAPI_SPEC:/local/openapi.json" \
     -v "$PYTHON_CLIENT_DIR:/local/out" \
     -v "$PYTHON_CLIENT_DIR/openapi-generator-config.yaml:/local/config.yaml" \
-    openapitools/openapi-generator-cli generate \
+    "openapitools/openapi-generator-cli:${OPENAPI_GENERATOR_VERSION}" generate \
     -i /local/openapi.json \
     -g python \
     -o /local/out \
@@ -141,6 +150,162 @@ if [ -f "$PYTHON_CLIENT_DIR/hindsight_client_api_README.md" ]; then
     rm "$PYTHON_CLIENT_DIR/hindsight_client_api_README.md"
 fi
 
+# Patch rest.py to defer aiohttp initialization (fixes "no running event loop" error)
+# The generated code creates aiohttp.TCPConnector in __init__ which requires a running event loop.
+# We patch it to defer initialization until the first request (which runs in async context).
+echo "Patching rest.py for deferred aiohttp initialization..."
+REST_FILE="$PYTHON_CLIENT_DIR/hindsight_client_api/rest.py"
+if [ -f "$REST_FILE" ]; then
+    cd "$PROJECT_ROOT"
+    python3 << PATCH_SCRIPT
+import re
+
+rest_file = "$PYTHON_CLIENT_DIR/hindsight_client_api/rest.py"
+
+with open(rest_file, 'r') as f:
+    content = f.read()
+
+# Replace the __init__ method to defer initialization
+old_init = '''class RESTClientObject:
+
+    def __init__(self, configuration) -> None:
+
+        # maxsize is number of requests to host that are allowed in parallel
+        maxsize = configuration.connection_pool_maxsize
+
+        ssl_context = ssl.create_default_context(
+            cafile=configuration.ssl_ca_cert
+        )
+        if configuration.cert_file:
+            ssl_context.load_cert_chain(
+                configuration.cert_file, keyfile=configuration.key_file
+            )
+
+        if not configuration.verify_ssl:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        connector = aiohttp.TCPConnector(
+            limit=maxsize,
+            ssl=ssl_context
+        )
+
+        self.proxy = configuration.proxy
+        self.proxy_headers = configuration.proxy_headers
+
+        # https pool manager
+        self.pool_manager = aiohttp.ClientSession(
+            connector=connector,
+            trust_env=True
+        )
+
+        retries = configuration.retries
+        self.retry_client: Optional[aiohttp_retry.RetryClient]
+        if retries is not None:
+            self.retry_client = aiohttp_retry.RetryClient(
+                client_session=self.pool_manager,
+                retry_options=aiohttp_retry.ExponentialRetry(
+                    attempts=retries,
+                    factor=2.0,
+                    start_timeout=0.1,
+                    max_timeout=120.0
+                )
+            )
+        else:
+            self.retry_client = None'''
+
+new_init = '''class RESTClientObject:
+
+    def __init__(self, configuration) -> None:
+        # Store configuration for deferred initialization
+        # aiohttp.TCPConnector requires a running event loop, so we defer
+        # creation until the first request (which runs in async context)
+        self._configuration = configuration
+        self._pool_manager: Optional[aiohttp.ClientSession] = None
+        self._retry_client: Optional[aiohttp_retry.RetryClient] = None
+
+        self.proxy = configuration.proxy
+        self.proxy_headers = configuration.proxy_headers
+
+    def _ensure_session(self) -> None:
+        """Create aiohttp session lazily (must be called from async context)."""
+        if self._pool_manager is not None:
+            return
+
+        configuration = self._configuration
+        maxsize = configuration.connection_pool_maxsize
+
+        ssl_context = ssl.create_default_context(
+            cafile=configuration.ssl_ca_cert
+        )
+        if configuration.cert_file:
+            ssl_context.load_cert_chain(
+                configuration.cert_file, keyfile=configuration.key_file
+            )
+
+        if not configuration.verify_ssl:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        connector = aiohttp.TCPConnector(
+            limit=maxsize,
+            ssl=ssl_context
+        )
+
+        self._pool_manager = aiohttp.ClientSession(
+            connector=connector,
+            trust_env=True
+        )
+
+        retries = configuration.retries
+        if retries is not None:
+            self._retry_client = aiohttp_retry.RetryClient(
+                client_session=self._pool_manager,
+                retry_options=aiohttp_retry.ExponentialRetry(
+                    attempts=retries,
+                    factor=2.0,
+                    start_timeout=0.1,
+                    max_timeout=120.0
+                )
+            )
+
+    @property
+    def pool_manager(self) -> aiohttp.ClientSession:
+        """Get the pool manager, initializing if needed."""
+        self._ensure_session()
+        return self._pool_manager
+
+    @property
+    def retry_client(self) -> Optional[aiohttp_retry.RetryClient]:
+        """Get the retry client, initializing if needed."""
+        self._ensure_session()
+        return self._retry_client'''
+
+if old_init in content:
+    content = content.replace(old_init, new_init)
+
+    # Also update the close method to handle None pool_manager
+    old_close = '''    async def close(self):
+        await self.pool_manager.close()
+        if self.retry_client is not None:
+            await self.retry_client.close()'''
+
+    new_close = '''    async def close(self):
+        if self._pool_manager is not None:
+            await self._pool_manager.close()
+        if self._retry_client is not None:
+            await self._retry_client.close()'''
+
+    content = content.replace(old_close, new_close)
+
+    with open(rest_file, 'w') as f:
+        f.write(content)
+    print("  ✓ rest.py patched successfully")
+else:
+    print("  ⚠ Could not find expected pattern in rest.py - skipping patch")
+PATCH_SCRIPT
+fi
+
 echo "✓ Python client generated at $PYTHON_CLIENT_DIR"
 echo ""
 
@@ -162,11 +327,87 @@ rm -rf "$TYPESCRIPT_CLIENT_DIR/services"
 rm -f "$TYPESCRIPT_CLIENT_DIR/index.ts"
 
 # Generate new client using @hey-api/openapi-ts
+# Use npm run generate to use the locally installed version (pinned in package.json)
+# instead of npx --yes which would fetch the latest version
 echo "Generating from $OPENAPI_SPEC..."
 cd "$TYPESCRIPT_CLIENT_DIR"
-npx --yes @hey-api/openapi-ts
+npm run generate
 
 echo "✓ TypeScript client generated at $TYPESCRIPT_CLIENT_DIR"
+echo ""
+
+# Generate Go client
+echo "=================================================="
+echo "Generating Go client..."
+echo "=================================================="
+
+GO_CLIENT_DIR="$CLIENTS_DIR/go"
+
+if ! command -v go &> /dev/null; then
+    echo "⚠ Go not found, skipping Go client generation"
+    echo "  Install Go 1.25+ from https://go.dev/dl/"
+else
+    echo "Regenerating Go client (via OpenAPI Generator Docker)..."
+    cd "$GO_CLIENT_DIR"
+
+    # Save maintained files to temp
+    TEMP_DIR=$(mktemp -d)
+    echo "Preserving maintained files..."
+    [ -f "README.md" ] && cp README.md "$TEMP_DIR/"
+    [ -f "integration_test.go" ] && cp integration_test.go "$TEMP_DIR/"
+    [ -f "null_test.go" ] && cp null_test.go "$TEMP_DIR/"
+    [ -f "trace_test.go" ] && cp trace_test.go "$TEMP_DIR/"
+    [ -f "hindsight_client.go" ] && cp hindsight_client.go "$TEMP_DIR/"
+
+    # Remove old generated files
+    echo "Removing old generated code..."
+    rm -f api_*.go model_*.go client.go configuration.go response.go utils.go
+    rm -rf docs/ .openapi-generator/
+    rm -f go.mod go.sum
+
+    # Generate new client via Docker (--platform linux/amd64 ensures identical output on macOS and Linux CI)
+    echo "Generating client from OpenAPI spec..."
+    docker run --rm \
+        --platform linux/amd64 \
+        --user "$(id -u):$(id -g)" \
+        -v "$OPENAPI_SPEC:/local/openapi.json" \
+        -v "$GO_CLIENT_DIR:/local/out" \
+        "openapitools/openapi-generator-cli:${OPENAPI_GENERATOR_VERSION}" generate \
+        -i /local/openapi.json \
+        -g go \
+        -o /local/out \
+        --package-name hindsight \
+        --git-user-id vectorize-io \
+        --git-repo-id hindsight/hindsight-clients/go \
+        --global-property apiDocs=false,apiTests=false,modelDocs=false,modelTests=false
+
+    # Remove OpenAPI Generator boilerplate files
+    echo "Removing boilerplate files..."
+    rm -rf docs/ git_push.sh .travis.yml .gitlab-ci.yml .openapi-generator-ignore .openapi-generator/
+
+    # Restore maintained files from temp
+    echo "Restoring maintained files..."
+    [ -f "$TEMP_DIR/README.md" ] && mv "$TEMP_DIR/README.md" .
+    [ -f "$TEMP_DIR/integration_test.go" ] && mv "$TEMP_DIR/integration_test.go" .
+    [ -f "$TEMP_DIR/null_test.go" ] && mv "$TEMP_DIR/null_test.go" .
+    [ -f "$TEMP_DIR/trace_test.go" ] && mv "$TEMP_DIR/trace_test.go" .
+    [ -f "$TEMP_DIR/hindsight_client.go" ] && mv "$TEMP_DIR/hindsight_client.go" .
+    rm -rf "$TEMP_DIR"
+
+    # Fix known generator issue: api_files.go uses os.File but generator omits "os" import
+    if [ -f "api_files.go" ] && grep -q 'os\.File' api_files.go && ! grep -q '"os"' api_files.go; then
+        echo "Patching api_files.go: adding missing 'os' import..."
+        sed -i.bak 's|"net/url"|"net/url"\n\t"os"|' api_files.go
+        rm -f api_files.go.bak
+    fi
+
+    # Initialize module and build
+    echo "Building Go client..."
+    go mod tidy
+    go build ./...
+
+    echo "✓ Go client generated at $GO_CLIENT_DIR"
+fi
 echo ""
 
 echo "=================================================="
@@ -176,6 +417,7 @@ echo ""
 echo "Rust client:       $RUST_CLIENT_DIR"
 echo "Python client:     $PYTHON_CLIENT_DIR"
 echo "TypeScript client: $TYPESCRIPT_CLIENT_DIR"
+echo "Go client:         $GO_CLIENT_DIR"
 echo ""
 echo "⚠️  Important: The maintained wrapper hindsight_client.py and README.md were preserved"
 echo ""

@@ -65,7 +65,7 @@ fi
 print_info "Updating version in all components..."
 
 # Update Python packages
-PYTHON_PACKAGES=("hindsight-api" "hindsight-dev" "hindsight" "hindsight-integrations/litellm" "hindsight-embed")
+PYTHON_PACKAGES=("hindsight-api" "hindsight-dev" "hindsight" "hindsight-integrations/litellm" "hindsight-integrations/crewai" "hindsight-integrations/pydantic-ai" "hindsight-embed")
 for package in "${PYTHON_PACKAGES[@]}"; do
     PYPROJECT_FILE="$package/pyproject.toml"
     if [ -f "$PYPROJECT_FILE" ]; then
@@ -74,6 +74,22 @@ for package in "${PYTHON_PACKAGES[@]}"; do
         rm "${PYPROJECT_FILE}.bak"
     else
         print_warn "File $PYPROJECT_FILE not found, skipping"
+    fi
+done
+
+# Update __version__ in Python __init__.py files
+PYTHON_INIT_FILES=(
+    "hindsight-api/hindsight_api/__init__.py"
+    "hindsight-embed/hindsight_embed/__init__.py"
+    "hindsight-clients/python/hindsight_client_api/__init__.py"
+)
+for init_file in "${PYTHON_INIT_FILES[@]}"; do
+    if [ -f "$init_file" ]; then
+        print_info "Updating __version__ in $init_file"
+        sed -i.bak "s/^__version__ = \".*\"/__version__ = \"$VERSION\"/" "$init_file"
+        rm "${init_file}.bak"
+    else
+        print_warn "File $init_file not found, skipping"
     fi
 done
 
@@ -128,32 +144,98 @@ else
     print_warn "File $TYPESCRIPT_CLIENT_PKG not found, skipping"
 fi
 
-# Show changes
-print_info "Changes to be committed:"
-git diff
+# Update OpenClaw integration
+OPENCLAW_PKG="hindsight-integrations/openclaw/package.json"
+if [ -f "$OPENCLAW_PKG" ]; then
+    print_info "Updating $OPENCLAW_PKG"
+    sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" "$OPENCLAW_PKG"
+    rm "${OPENCLAW_PKG}.bak"
+else
+    print_warn "File $OPENCLAW_PKG not found, skipping"
+fi
 
-# Confirm changes
-echo
-read -p "Do you want to commit these changes and create tag v$VERSION? (y/n) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    print_error "Release cancelled. Rolling back changes..."
-    git checkout .
-    exit 1
+# Update AI SDK integration
+AI_SDK_PKG="hindsight-integrations/ai-sdk/package.json"
+if [ -f "$AI_SDK_PKG" ]; then
+    print_info "Updating $AI_SDK_PKG"
+    sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" "$AI_SDK_PKG"
+    rm "${AI_SDK_PKG}.bak"
+else
+    print_warn "File $AI_SDK_PKG not found, skipping"
+fi
+
+# Update Chat SDK integration
+CHAT_SDK_PKG="hindsight-integrations/chat/package.json"
+if [ -f "$CHAT_SDK_PKG" ]; then
+    print_info "Updating $CHAT_SDK_PKG"
+    sed -i.bak "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" "$CHAT_SDK_PKG"
+    rm "${CHAT_SDK_PKG}.bak"
+else
+    print_warn "File $CHAT_SDK_PKG not found, skipping"
+fi
+
+# Update documentation version (creates new version or syncs to existing)
+print_info "Updating documentation for version $VERSION..."
+if [ -f "scripts/update-docs-version.sh" ]; then
+    ./scripts/update-docs-version.sh "$VERSION" 2>&1 | grep -E "✓|IMPORTANT|Error" || true
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        print_info "✓ Documentation updated"
+    else
+        print_warn "Failed to update documentation, but continuing..."
+    fi
+else
+    print_warn "update-docs-version.sh not found, skipping docs update"
+fi
+
+# Regenerate OpenAPI spec and clients with new version
+print_info "Regenerating OpenAPI spec and client SDKs..."
+if ./scripts/generate-openapi.sh && ./scripts/generate-clients.sh; then
+    print_info "✓ OpenAPI spec and clients regenerated"
+else
+    print_error "Failed to regenerate clients"
+    print_warn "You may need to fix this manually before committing"
+    read -p "Continue anyway? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_error "Release cancelled. Rolling back changes..."
+        git checkout .
+        exit 1
+    fi
 fi
 
 # Commit changes
 print_info "Committing version changes..."
 git add -A
-git commit --no-verify -m "Release v$VERSION
+
+# Extract major.minor and patch for commit message
+MAJOR_MINOR=$(echo "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+)\.[0-9]+$/\1/')
+PATCH_VERSION=$(echo "$VERSION" | sed -E 's/^[0-9]+\.[0-9]+\.([0-9]+)$/\1/')
+
+# Build commit message
+COMMIT_MSG="Release v$VERSION
 
 - Update version to $VERSION in all components
-- Python packages: hindsight-api, hindsight-dev, hindsight-all, hindsight-litellm, hindsight-embed
+- Regenerate OpenAPI spec and client SDKs
+- Python packages: hindsight-api, hindsight-dev, hindsight-all, hindsight-litellm, hindsight-crewai, hindsight-pydantic-ai, hindsight-embed
 - Python client: hindsight-clients/python
 - TypeScript client: hindsight-clients/typescript
 - Rust CLI: hindsight-cli
 - Control Plane: hindsight-control-plane
+- OpenClaw integration: hindsight-integrations/openclaw
+- AI SDK integration: hindsight-integrations/ai-sdk
+- Chat SDK integration: hindsight-integrations/chat
 - Helm chart"
+
+# Add docs update note
+if [ "$PATCH_VERSION" != "0" ]; then
+    COMMIT_MSG="$COMMIT_MSG
+- Sync documentation to version-$MAJOR_MINOR"
+else
+    COMMIT_MSG="$COMMIT_MSG
+- Create documentation version-$MAJOR_MINOR"
+fi
+
+git commit --no-verify -m "$COMMIT_MSG"
 
 # Create tag
 print_info "Creating tag v$VERSION..."

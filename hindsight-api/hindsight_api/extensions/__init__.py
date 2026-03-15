@@ -16,11 +16,26 @@ with the system (e.g., running migrations for tenant schemas).
 """
 
 from hindsight_api.extensions.base import Extension
-from hindsight_api.extensions.builtin import ApiKeyTenantExtension
+from hindsight_api.extensions.builtin import ApiKeyTenantExtension, SupabaseTenantExtension
 from hindsight_api.extensions.context import DefaultExtensionContext, ExtensionContext
 from hindsight_api.extensions.http import HttpExtension
 from hindsight_api.extensions.loader import load_extension
+from hindsight_api.extensions.mcp import MCPExtension
 from hindsight_api.extensions.operation_validator import (
+    # Bank Management operations
+    BankListContext,
+    BankListResult,
+    BankReadContext,
+    BankWriteContext,
+    # Consolidation operation
+    ConsolidateContext,
+    ConsolidateResult,
+    # Mental Model operations
+    MentalModelGetContext,
+    MentalModelGetResult,
+    MentalModelRefreshContext,
+    MentalModelRefreshResult,
+    # Core operations
     OperationValidationError,
     OperationValidatorExtension,
     RecallContext,
@@ -33,6 +48,7 @@ from hindsight_api.extensions.operation_validator import (
 )
 from hindsight_api.extensions.tenant import (
     AuthenticationError,
+    Tenant,
     TenantContext,
     TenantExtension,
 )
@@ -47,7 +63,9 @@ __all__ = [
     "DefaultExtensionContext",
     # HTTP Extension
     "HttpExtension",
-    # Operation Validator
+    # MCP Extension
+    "MCPExtension",
+    # Operation Validator - Core
     "OperationValidationError",
     "OperationValidatorExtension",
     "RecallContext",
@@ -57,10 +75,25 @@ __all__ = [
     "RetainContext",
     "RetainResult",
     "ValidationResult",
+    # Operation Validator - Bank Management
+    "BankListContext",
+    "BankListResult",
+    "BankReadContext",
+    "BankWriteContext",
+    # Operation Validator - Consolidation
+    "ConsolidateContext",
+    "ConsolidateResult",
+    # Operation Validator - Mental Model
+    "MentalModelGetContext",
+    "MentalModelGetResult",
+    "MentalModelRefreshContext",
+    "MentalModelRefreshResult",
     # Tenant/Auth
     "ApiKeyTenantExtension",
+    "SupabaseTenantExtension",
     "AuthenticationError",
     "RequestContext",
+    "Tenant",
     "TenantContext",
     "TenantExtension",
 ]

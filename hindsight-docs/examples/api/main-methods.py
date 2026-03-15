@@ -75,18 +75,20 @@ results = client.recall(
     types=["world"]  # Only world facts
 )
 
-# Include entity information
+# Include source chunks for more context
 results = client.recall(
     bank_id="my-bank",
     query="Tell me about Alice",
-    include_entities=True,
-    max_entity_tokens=500
+    include_chunks=True,
+    max_chunk_tokens=500
 )
 
-# Check entity details
-for entity_id, entity in (results.entities or {}).items():
-    print(f"Entity: {entity.canonical_name}")
-    print(f"Observations: {entity.observations}")
+# Check chunk details (chunks are on response level, keyed by memory ID)
+for result in results.results:
+    print(f"Memory: {result.text}")
+    if results.chunks and result.id in results.chunks:
+        chunk = results.chunks[result.id]
+        print(f"  Source: {chunk.text[:100]}...")
 # [/docs:main-recall]
 
 
@@ -98,21 +100,23 @@ for entity_id, entity in (results.entities or {}).items():
 # Basic reflect
 response = client.reflect(
     bank_id="my-bank",
-    query="Should we adopt TypeScript for our backend?"
+    query="Should we adopt TypeScript for our backend?",
+    include_facts=True,
 )
 
 print(response.text)
-print("\nBased on:", len(response.based_on or []), "facts")
+print("\nBased on:", len(response.based_on.memories if response.based_on else []), "facts")
 
 # Reflect with options
 response = client.reflect(
     bank_id="my-bank",
     query="What are Alice's strengths for the team lead role?",
-    budget="high"  # More thorough reasoning
+    budget="high",  # More thorough reasoning
+    include_facts=True,
 )
 
 # See which facts influenced the response
-for fact in response.based_on or []:
+for fact in (response.based_on.memories if response.based_on else []):
     print(f"- {fact.text}")
 # [/docs:main-reflect]
 

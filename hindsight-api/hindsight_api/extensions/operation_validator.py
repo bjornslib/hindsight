@@ -1,4 +1,4 @@
-"""Operation Validator Extension for validating retain/recall/reflect operations."""
+"""Operation Validator Extension for validating retain/recall/reflect/consolidate operations."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -17,8 +17,9 @@ if TYPE_CHECKING:
 class OperationValidationError(Exception):
     """Raised when an operation fails validation."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, status_code: int = 403):
         self.reason = reason
+        self.status_code = status_code
         super().__init__(f"Operation validation failed: {reason}")
 
 
@@ -28,6 +29,7 @@ class ValidationResult:
 
     allowed: bool
     reason: str | None = None
+    status_code: int = 403  # Default to Forbidden
 
     @classmethod
     def accept(cls) -> "ValidationResult":
@@ -35,9 +37,9 @@ class ValidationResult:
         return cls(allowed=True)
 
     @classmethod
-    def reject(cls, reason: str) -> "ValidationResult":
-        """Create a rejected validation result with a reason."""
-        return cls(allowed=False, reason=reason)
+    def reject(cls, reason: str, status_code: int = 403) -> "ValidationResult":
+        """Create a rejected validation result with a reason and HTTP status code."""
+        return cls(allowed=False, reason=reason, status_code=status_code)
 
 
 # =============================================================================
@@ -96,6 +98,19 @@ class ReflectContext:
 
 
 # =============================================================================
+# Consolidation Pre-operation Context
+# =============================================================================
+
+
+@dataclass
+class ConsolidateContext:
+    """Context for a consolidation operation validation (pre-operation)."""
+
+    bank_id: str
+    request_context: "RequestContext"
+
+
+# =============================================================================
 # Post-operation Contexts (includes results)
 # =============================================================================
 
@@ -117,6 +132,10 @@ class RetainResult:
     unit_ids: list[list[str]]  # List of unit IDs per content item
     success: bool = True
     error: str | None = None
+    # Actual LLM token usage (populated by engine when available)
+    llm_input_tokens: int | None = None
+    llm_output_tokens: int | None = None
+    llm_total_tokens: int | None = None
 
 
 @dataclass
@@ -162,9 +181,117 @@ class ReflectResultContext:
     error: str | None = None
 
 
+# =============================================================================
+# Consolidation Post-operation Context
+# =============================================================================
+
+
+@dataclass
+class ConsolidateResult:
+    """Result context for post-consolidation hook."""
+
+    bank_id: str
+    request_context: "RequestContext"
+    # Result
+    processed: int = 0
+    created: int = 0
+    updated: int = 0
+    success: bool = True
+    error: str | None = None
+
+
+# =============================================================================
+# Bank Management Contexts
+# =============================================================================
+
+
+@dataclass
+class BankReadContext:
+    """Context for a bank read operation validation (pre-operation)."""
+
+    bank_id: str
+    operation: str  # "get_bank_profile", "get_bank_stats"
+    request_context: "RequestContext"
+
+
+@dataclass
+class BankWriteContext:
+    """Context for a bank write operation validation (pre-operation)."""
+
+    bank_id: str
+    operation: str  # "delete_bank", "update_bank", "update_bank_disposition", "set_bank_mission", "merge_bank_mission", "clear_observations", "clear_observations_for_memory"
+    request_context: "RequestContext"
+
+
+@dataclass
+class BankListContext:
+    """Context for filtering the bank list (post-query)."""
+
+    banks: list[dict]
+    request_context: "RequestContext"
+
+
+@dataclass
+class BankListResult:
+    """Result of filtering the bank list."""
+
+    banks: list[dict]
+
+
+# =============================================================================
+# Mental Model Contexts
+# =============================================================================
+
+
+@dataclass
+class MentalModelGetContext:
+    """Context for a mental model GET operation validation (pre-operation)."""
+
+    bank_id: str
+    mental_model_id: str
+    request_context: "RequestContext"
+
+
+@dataclass
+class MentalModelRefreshContext:
+    """Context for a mental model refresh/create operation validation (pre-operation)."""
+
+    bank_id: str
+    mental_model_id: str | None  # None for create (not yet assigned)
+    request_context: "RequestContext"
+
+
+@dataclass
+class MentalModelGetResult:
+    """Result context for post-mental-model-GET hook."""
+
+    bank_id: str
+    mental_model_id: str
+    request_context: "RequestContext"
+    output_tokens: int  # tokens in the returned content
+    success: bool = True
+    error: str | None = None
+
+
+@dataclass
+class MentalModelRefreshResult:
+    """Result context for post-mental-model-refresh hook."""
+
+    bank_id: str
+    mental_model_id: str
+    request_context: "RequestContext"
+    query_tokens: int  # tokens in source_query
+    output_tokens: int  # tokens in generated content
+    context_tokens: int  # tokens in context (if any)
+    facts_used: int  # facts referenced in based_on
+    mental_models_used: int  # mental models referenced in based_on
+    success: bool = True
+    error: str | None = None
+
+
 class OperationValidatorExtension(Extension, ABC):
     """
-    Validates and hooks into retain/recall/reflect operations.
+    Validates and hooks into retain/recall/reflect/consolidate operations.
 
     This extension allows implementing custom logic such as:
     - Rate limiting (pre-operation)
@@ -183,9 +310,13 @@ class OperationValidatorExtension(Extension, ABC):
         -> config = {"max_requests": "100"}
 
     Hook execution order:
-        1. validate_retain/validate_recall/validate_reflect (pre-operation)
+        1. validate_* (pre-operation)
         2. [operation executes]
-        3. on_retain_complete/on_recall_complete/on_reflect_complete (post-operation)
+        3. on_*_complete (post-operation)
+
+    Supported operations:
+        - retain, recall, reflect (core memory operations)
+        - consolidate (mental models consolidation)
     """
 
     # =========================================================================
@@ -323,3 +454,182 @@ class OperationValidatorExtension(Extension, ABC):
                 - error: Error message (if failed)
         """
         pass
+
+    # =========================================================================
+    # Consolidation - Pre-operation validation hook (optional - override to implement)
+    # =========================================================================
+
+    async def validate_consolidate(self, ctx: ConsolidateContext) -> ValidationResult:
+        """
+        Validate a consolidation operation before execution.
+
+        Override to implement custom validation logic for consolidation.
+
+        Args:
+            ctx: Context containing:
+                - bank_id: Bank identifier
+                - request_context: Request context with auth info
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    # =========================================================================
+    # Consolidation - Post-operation hook (optional - override to implement)
+    # =========================================================================
+
+    async def on_consolidate_complete(self, result: ConsolidateResult) -> None:
+        """
+        Called after a consolidation operation completes (success or failure).
+
+        Override to implement post-operation logic such as usage tracking or audit logging.
+
+        Args:
+            result: Result context containing:
+                - bank_id: Bank identifier
+                - processed: Number of memories processed
+                - created: Number of mental models created
+                - updated: Number of mental models updated
+                - success: Whether the operation succeeded
+                - error: Error message (if failed)
+        """
+        pass
+
+    # =========================================================================
+    # Mental Model - Pre-operation validation hook (optional - override to implement)
+    # =========================================================================
+
+    async def validate_mental_model_get(self, ctx: MentalModelGetContext) -> ValidationResult:
+        """
+        Validate a mental model GET operation before execution.
+
+        Override to implement custom validation logic for mental model retrieval.
+
+        Args:
+            ctx: Context containing:
+                - bank_id: Bank identifier
+                - mental_model_id: Mental model identifier
+                - request_context: Request context with auth info
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    async def validate_mental_model_refresh(self, ctx: MentalModelRefreshContext) -> ValidationResult:
+        """
+        Validate a mental model refresh/create operation before execution.
+
+        Override to implement custom validation logic for mental model refresh.
+
+        Args:
+            ctx: Context containing:
+                - bank_id: Bank identifier
+                - mental_model_id: Mental model identifier (None for create)
+                - request_context: Request context with auth info
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    # =========================================================================
+    # Mental Model - Post-operation hooks (optional - override to implement)
+    # =========================================================================
+
+    async def on_mental_model_get_complete(self, result: MentalModelGetResult) -> None:
+        """
+        Called after a mental model GET operation completes (success or failure).
+
+        Override to implement post-operation logic such as tracking or audit logging.
+
+        Args:
+            result: Result context containing:
+                - bank_id: Bank identifier
+                - mental_model_id: Mental model identifier
+                - output_tokens: Token count of the returned content
+                - success: Whether the operation succeeded
+                - error: Error message (if failed)
+        """
+        pass
+
+    async def on_mental_model_refresh_complete(self, result: MentalModelRefreshResult) -> None:
+        """
+        Called after a mental model refresh operation completes (success or failure).
+
+        Override to implement post-operation logic such as tracking or audit logging.
+
+        Args:
+            result: Result context containing:
+                - bank_id: Bank identifier
+                - mental_model_id: Mental model identifier
+                - query_tokens: Tokens in source_query
+                - output_tokens: Tokens in generated content
+                - context_tokens: Tokens in context
+                - facts_used: Number of facts referenced
+                - mental_models_used: Number of mental models referenced
+                - success: Whether the operation succeeded
+                - error: Error message (if failed)
+        """
+        pass
+
+    # =========================================================================
+    # Bank Management - Validation hooks (optional - override to implement)
+    # =========================================================================
+
+    async def validate_bank_read(self, ctx: BankReadContext) -> ValidationResult:
+        """
+        Validate a bank read operation before execution.
+
+        Override to implement custom validation logic for bank reads
+        (get_bank_profile, get_bank_stats).
+
+        Args:
+            ctx: Context containing:
+                - bank_id: Bank identifier
+                - operation: Operation name
+                - request_context: Request context with auth info
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    async def validate_bank_write(self, ctx: BankWriteContext) -> ValidationResult:
+        """
+        Validate a bank write operation before execution.
+
+        Override to implement custom validation logic for bank writes
+        (delete_bank, update_bank, update_bank_disposition, set_bank_mission,
+        merge_bank_mission, clear_observations, clear_observations_for_memory).
+
+        Args:
+            ctx: Context containing:
+                - bank_id: Bank identifier
+                - operation: Operation name
+                - request_context: Request context with auth info
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    async def filter_bank_list(self, ctx: BankListContext) -> BankListResult:
+        """
+        Filter the bank list after querying.
+
+        Unlike validate_* methods, this is a post-query filter that narrows results
+        rather than a gate that blocks the operation.
+
+        Override to implement custom filtering (e.g., restrict to allowed banks).
+
+        Args:
+            ctx: Context containing:
+                - banks: List of bank dicts from the database
+                - request_context: Request context with auth info
+
+        Returns:
+            BankListResult with the filtered list of banks.
+        """
+        return BankListResult(banks=ctx.banks)
