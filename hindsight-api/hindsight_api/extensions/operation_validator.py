@@ -239,6 +239,91 @@ class BankListResult:
 
 
 # =============================================================================
+# Cross-Bank Operation Contexts
+# =============================================================================
+
+
+@dataclass
+class CrossBankRecallContext:
+    """Context for a cross-bank recall operation validation (pre-operation).
+
+    Contains ALL user-provided parameters for the cross-bank recall operation.
+    """
+
+    bank_ids: list[str] | None  # None = all accessible banks
+    query: str
+    request_context: "RequestContext"
+    budget: "Budget | None" = None
+    bank_tags: list[str] | None = None  # Alternative: filter banks by tag
+    max_results: int = 20
+
+
+@dataclass
+class CrossBankRecallResult:
+    """Result context for post-cross-bank-recall hook.
+
+    Contains the operation parameters and aggregated results.
+    """
+
+    bank_ids: list[str]  # Banks that were actually queried
+    query: str
+    request_context: "RequestContext"
+    budget: "Budget | None"
+    bank_tags: list[str] | None
+    max_results: int
+    # Results
+    results_per_bank: dict[str, int]  # bank_id -> fact count
+    total_results: int = 0
+    fusion_metadata: dict[str, Any] | None = None  # RRF weights, dedup counts
+    success: bool = True
+    error: str | None = None
+
+
+@dataclass
+class CrossBankReflectContext:
+    """Context for a cross-bank reflect operation validation (pre-operation).
+
+    Contains ALL user-provided parameters for the cross-bank reflect operation.
+    """
+
+    bank_ids: list[str] | None  # None = all accessible banks
+    query: str
+    request_context: "RequestContext"
+    budget: "Budget | None" = None
+    bank_tags: list[str] | None = None  # Alternative: filter banks by tag
+    context: str | None = None
+    include_mental_models: bool = True
+    include_reasoning_chain: bool = False
+    response_schema: dict[str, Any] | None = None
+
+
+@dataclass
+class CrossBankReflectResult:
+    """Result context for post-cross-bank-reflect hook.
+
+    Contains the operation parameters and aggregated results.
+    """
+
+    bank_ids: list[str]  # Banks that were actually queried
+    query: str
+    request_context: "RequestContext"
+    budget: "Budget | None"
+    bank_tags: list[str] | None
+    context: str | None
+    include_mental_models: bool
+    include_reasoning_chain: bool
+    response_schema: dict[str, Any] | None
+    # Results
+    facts_per_bank: dict[str, int]  # bank_id -> fact count used
+    mental_models_per_bank: dict[str, int]  # bank_id -> mental model count
+    reasoning_steps: int = 0  # Number of reasoning steps (0 for single-shot)
+    output_tokens: int = 0
+    structured_output: dict[str, Any] | None = None
+    success: bool = True
+    error: str | None = None
+
+
+# =============================================================================
 # Mental Model Contexts
 # =============================================================================
 
@@ -633,3 +718,104 @@ class OperationValidatorExtension(Extension, ABC):
             BankListResult with the filtered list of banks.
         """
         return BankListResult(banks=ctx.banks)
+
+    # =========================================================================
+    # Cross-Bank Operations - Validation hooks (optional - override to implement)
+    # =========================================================================
+
+    async def validate_cross_bank_recall(self, ctx: CrossBankRecallContext) -> ValidationResult:
+        """
+        Validate a cross-bank recall operation before execution.
+
+        Override to implement custom validation logic for cross-bank recall.
+        This is called once before the operation, before per-bank validate_recall calls.
+
+        Args:
+            ctx: Context containing:
+                - bank_ids: List of bank IDs to query (None = all accessible)
+                - query: The search query
+                - request_context: Request context with auth info
+                - budget: Budget level
+                - bank_tags: Optional tags for bank filtering
+                - max_results: Maximum results to return
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    async def validate_cross_bank_reflect(self, ctx: CrossBankReflectContext) -> ValidationResult:
+        """
+        Validate a cross-bank reflect operation before execution.
+
+        Override to implement custom validation logic for cross-bank reflect.
+        This is called once before the operation, before per-bank validate_reflect calls.
+
+        Args:
+            ctx: Context containing:
+                - bank_ids: List of bank IDs to query (None = all accessible)
+                - query: The question to reflect on
+                - request_context: Request context with auth info
+                - budget: Budget level
+                - bank_tags: Optional tags for bank filtering
+                - context: Additional context for reflection
+                - include_mental_models: Whether to consult mental models
+                - include_reasoning_chain: Whether to use multi-step reasoning
+                - response_schema: Optional JSON Schema for structured output
+
+        Returns:
+            ValidationResult indicating whether the operation is allowed.
+        """
+        return ValidationResult.accept()
+
+    # =========================================================================
+    # Cross-Bank Operations - Post-operation hooks (optional - override to implement)
+    # =========================================================================
+
+    async def on_cross_bank_recall_complete(self, result: CrossBankRecallResult) -> None:
+        """
+        Called after a cross-bank recall operation completes (success or failure).
+
+        Override to implement post-operation logic such as:
+        - Usage tracking
+        - Audit logging
+        - Cross-bank query analytics
+
+        This is called once after the operation, after all per-bank on_recall_complete calls.
+
+        Args:
+            result: Result context containing:
+                - bank_ids: Banks that were actually queried
+                - query: The search query
+                - results_per_bank: Fact counts per bank
+                - total_results: Total facts returned
+                - fusion_metadata: RRF weights, dedup counts
+                - success: Whether the operation succeeded
+                - error: Error message (if failed)
+        """
+        pass
+
+    async def on_cross_bank_reflect_complete(self, result: CrossBankReflectResult) -> None:
+        """
+        Called after a cross-bank reflect operation completes (success or failure).
+
+        Override to implement post-operation logic such as:
+        - Usage tracking
+        - Audit logging
+        - Cross-bank reflection analytics
+
+        This is called once after the operation, after all per-bank on_reflect_complete calls.
+
+        Args:
+            result: Result context containing:
+                - bank_ids: Banks that were actually queried
+                - query: The question reflected on
+                - facts_per_bank: Fact counts used per bank
+                - mental_models_per_bank: Mental model counts per bank
+                - reasoning_steps: Number of reasoning steps (0 for single-shot)
+                - output_tokens: Tokens in the generated response
+                - structured_output: Structured output if response_schema was provided
+                - success: Whether the operation succeeded
+                - error: Error message (if failed)
+        """
+        pass

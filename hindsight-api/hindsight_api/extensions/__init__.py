@@ -30,6 +30,11 @@ from hindsight_api.extensions.operation_validator import (
     # Consolidation operation
     ConsolidateContext,
     ConsolidateResult,
+    # Cross-Bank operations
+    CrossBankRecallContext,
+    CrossBankRecallResult,
+    CrossBankReflectContext,
+    CrossBankReflectResult,
     # Mental Model operations
     MentalModelGetContext,
     MentalModelGetResult,
@@ -83,6 +88,11 @@ __all__ = [
     # Operation Validator - Consolidation
     "ConsolidateContext",
     "ConsolidateResult",
+    # Operation Validator - Cross-Bank
+    "CrossBankRecallContext",
+    "CrossBankRecallResult",
+    "CrossBankReflectContext",
+    "CrossBankReflectResult",
     # Operation Validator - Mental Model
     "MentalModelGetContext",
     "MentalModelGetResult",
