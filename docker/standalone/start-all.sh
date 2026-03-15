@@ -1,6 +1,18 @@
 #!/bin/bash
 set -e
 
+# Graceful shutdown handler
+shutdown() {
+    echo "Shutdown signal received, stopping services..."
+    for pid in "${PIDS[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    wait "${PIDS[@]}" 2>/dev/null || true
+    echo "Services stopped cleanly."
+    exit 0
+}
+trap shutdown SIGTERM SIGINT
+
 # Service flags (default to true if not set)
 ENABLE_API="${HINDSIGHT_ENABLE_API:-true}"
 ENABLE_CP="${HINDSIGHT_ENABLE_CP:-true}"
