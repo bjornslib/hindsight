@@ -70,16 +70,16 @@ def FieldWithDefault(default_factory: Callable, **kwargs) -> Any:
     return Field(default_factory=default_factory, json_schema_extra=json_extra, **kwargs)
 
 
-from hindsight_api.config import get_config
-from hindsight_api.engine.db_utils import acquire_with_retry
-from hindsight_api.engine.memory_engine import Budget, _get_tiktoken_encoding, fq_table
-from hindsight_api.engine.reflect.observations import Observation
 from hindsight_api.api.cross_bank_models import (
     CrossBankRecallRequest,
     CrossBankRecallResult,
     CrossBankReflectRequest,
     CrossBankReflectResult,
 )
+from hindsight_api.config import get_config
+from hindsight_api.engine.db_utils import acquire_with_retry
+from hindsight_api.engine.memory_engine import Budget, _get_tiktoken_encoding, fq_table
+from hindsight_api.engine.reflect.observations import Observation
 from hindsight_api.engine.response_models import VALID_RECALL_FACT_TYPES, MemoryFact, TokenUsage
 from hindsight_api.engine.search.tags import TagsMatch
 from hindsight_api.extensions import HttpExtension, OperationValidationError, load_extension
@@ -632,6 +632,11 @@ class ReflectRequest(BaseModel):
         description="How to match tags: 'any' (OR, includes untagged), 'all' (AND, includes untagged), "
         "'any_strict' (OR, excludes untagged), 'all_strict' (AND, excludes untagged).",
     )
+    include_reasoning_chain: bool = Field(
+        default=False,
+        description="If true and budget is 'mid' or 'high', the response may include a reasoning_chain "
+        "showing how the query was decomposed into sub-questions and what was found for each.",
+    )
 
 
 class ReflectFact(BaseModel):
@@ -762,6 +767,11 @@ class ReflectResponse(BaseModel):
     trace: ReflectTrace | None = Field(
         default=None,
         description="Execution trace of tool and LLM calls. Only present when include.tool_calls is set.",
+    )
+    reasoning_chain: dict | None = Field(
+        default=None,
+        description="Reasoning chain showing query decomposition and intermediate conclusions. "
+        "Only present when include_reasoning_chain=true and budget >= mid.",
     )
 
 
@@ -2336,12 +2346,31 @@ def _register_routes(app: FastAPI):
                     llm_calls=llm_calls,
                 )
 
+            # Serialize reasoning chain if requested and present
+            reasoning_chain_data: dict | None = None
+            if request.include_reasoning_chain and core_result.reasoning_chain is not None:
+                rc = core_result.reasoning_chain
+                reasoning_chain_data = {
+                    "original_query": rc["original_query"],
+                    "decomposition_rationale": rc.get("decomposition_rationale", ""),
+                    "steps": [
+                        {
+                            "step_number": step["step_number"],
+                            "sub_question": step["sub_question"],
+                            "conclusion": step["conclusion"],
+                            "sources_used": step.get("sources_used", []),
+                        }
+                        for step in rc.get("steps", [])
+                    ],
+                }
+
             return ReflectResponse(
                 text=core_result.text,
                 based_on=based_on_result,
                 structured_output=core_result.structured_output,
                 usage=core_result.usage,
                 trace=trace_result,
+                reasoning_chain=reasoning_chain_data,
             )
 
         except OperationValidationError as e:
@@ -2489,7 +2518,7 @@ def _register_routes(app: FastAPI):
         except ValueError as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid budget value: {request.budget}. Use 'low', 'mid', or 'high'.",
+                detail=str(e),
             )
         except OperationValidationError as e:
             raise HTTPException(status_code=e.status_code, detail=e.reason)

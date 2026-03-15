@@ -4754,6 +4754,13 @@ class MemoryEngine(MemoryEngineInterface):
                 total_tokens=agent_result.usage.total_tokens,
             )
 
+            # Serialize reasoning chain if present
+            reasoning_chain_dict = None
+            if agent_result.reasoning_chain is not None:
+                import dataclasses as _dc
+
+                reasoning_chain_dict = _dc.asdict(agent_result.reasoning_chain)
+
             # Return response (compatible with existing API)
             result = ReflectResult(
                 text=agent_result.text,
@@ -4763,6 +4770,7 @@ class MemoryEngine(MemoryEngineInterface):
                 tool_trace=tool_trace_result,
                 llm_trace=llm_trace_result,
                 directives_applied=directives_applied_result,
+                reasoning_chain=reasoning_chain_dict,
             )
 
             # Call post-operation hook if validator is configured

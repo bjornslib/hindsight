@@ -107,13 +107,9 @@ class BudgetAllocator:
 
         per_bank_raw = int(budget_value / len(bank_ids))
 
-        # Ensure minimum budget per bank
+        # Ensure minimum budget per bank — auto-raise to minimum if too low
         if ensure_minimum and per_bank_raw < BudgetAllocator.MIN_BUDGET_PER_BANK:
-            min_required = len(bank_ids) * BudgetAllocator.MIN_BUDGET_PER_BANK
-            raise ValueError(
-                f"Budget {budget_value} too low for {len(bank_ids)} banks. "
-                f"Minimum required: {min_required} (LOW budget = {BudgetAllocator.MIN_BUDGET_PER_BANK} per bank)"
-            )
+            per_bank_raw = BudgetAllocator.MIN_BUDGET_PER_BANK
 
         allocation = {bank_id: per_bank_raw for bank_id in bank_ids}
         total_used = per_bank_raw * len(bank_ids)
