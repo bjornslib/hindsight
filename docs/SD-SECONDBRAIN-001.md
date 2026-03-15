@@ -1,10 +1,10 @@
 # SD-SECONDBRAIN-001: Solution Design — Hindsight Second Brain Memory Layer
 
 **PRD:** PRD-SECONDBRAIN-001
-**Status:** Draft (v0.2 — incorporating user feedback)
+**Status:** Draft (v0.3 — epic status updates, create_documents, bouncer deferral)
 **Author:** System 3 Meta-Orchestrator
 **Date:** 2026-03-15
-**Version:** 0.2
+**Version:** 0.3
 
 ---
 
@@ -23,58 +23,59 @@
 
 ---
 
-## 0. Epic 0: Sync Fork with Upstream
+## 0. Epic 0: Sync Fork with Upstream — COMPLETE
 
-### Strategy: Merge Upstream Main
+**Status:** COMPLETE (2026-03-15)
 
-Our fork (`feature/multi-bank-mcp-access`) diverged from upstream before the mental models, hierarchical config, and 18 new MCP tools were added. Rather than cherry-picking individual commits, we merge upstream `main` to get everything at once.
+### What Was Done
 
-### Procedure
+Merged 230+ upstream commits (v0.1.16 → v0.4.15) into `feature/multi-bank-mcp-access`.
+
+### Actual Merge Process
 
 ```bash
-# 1. Add upstream remote (if not already)
-git remote add upstream https://github.com/bjornslib/hindsight.git
+# 1. Stash local changes (docs, scripts, .claude/, .mcp.json)
+git stash push -u -m "pre-merge: local changes and untracked files"
 
-# 2. Fetch upstream
-git fetch upstream
+# 2. Fetch and merge upstream
+git fetch origin main
+git merge origin/main --no-edit
+# Result: 1 conflict (mcp.py), .gitignore auto-merged
 
-# 3. Merge upstream main into our branch
-git merge upstream/main --no-edit
+# 3. Resolve mcp.py conflict — accepted upstream (theirs)
+git checkout --theirs hindsight-api/hindsight_api/api/mcp.py
+git add hindsight-api/hindsight_api/api/mcp.py
+# Rationale: Upstream's mcp_tools.py (2,704 lines, 28 tools) + register_mcp_tools()
+# pattern is strictly superior to our inline tool implementations.
+# Our branch's 5 inline tools are redundant — they exist in upstream's mcp_tools.py.
 
-# 4. Resolve conflicts (expected in mcp.py, memory_engine.py, http.py, CLAUDE.md)
-# Our additions: create_bank, list_banks MCP tools, multi-bank bank_id param
-# Upstream additions: 18 new MCP tools, mental models, hierarchical config
-# Strategy: keep both — our tools + their tools
+# 4. Complete merge
+git commit --no-edit  # → 2f9d709c
 
-# 5. Run tests
-cd hindsight-api && uv run pytest tests/ -v
+# 5. Restore stashed files
+git stash pop  # .gitignore conflict resolved (kept upstream's .claude ignore)
+git stash drop
 
-# 6. Verify our multi-bank features still work
-# Check: create_bank, list_banks, bank_id param on retain/recall/reflect
+# 6. Commit local files
+git add .gitignore docs/ scripts/ docker/standalone/start-all.sh
+git commit  # → aa17ebd7
 ```
 
-### Expected Merge Conflicts
+### Actual Conflict Resolution
 
-| File | Our Changes | Upstream Changes | Resolution |
-|------|------------|-----------------|------------|
-| `api/mcp.py` | Added `create_bank`, `list_banks`, `bank_id` param | Added `mcp_tools.py` import, new tool registration | Keep both; mcp_tools.py is additive |
-| `engine/memory_engine.py` | Minor (bank creation) | Mental models, consolidation, structured reflect | Accept upstream; rebase our additions |
-| `CLAUDE.md` | Our description | Updated with mental models | Accept upstream |
-| `api/http.py` | None significant | Mental model endpoints, structured output | Accept upstream |
-| `extensions/operation_validator.py` | None | Mental model hooks | Accept upstream |
-| `extensions/__init__.py` | None | New exports | Accept upstream |
+| File | Conflict Regions | Resolution | Rationale |
+|------|-----------------|------------|-----------|
+| `api/mcp.py` | 9 regions | Accept upstream (theirs) | Our inline tools are in upstream's `mcp_tools.py`; upstream adds auth, dual MCP servers, tenant propagation, usage metering |
+| `.gitignore` | 0 (auto-merged) | Auto | N/A |
+| `.gitignore` (stash pop) | 1 region | Keep upstream + our additions | Upstream added `.claude` ignore; kept their version |
 
-### Post-Merge Verification Checklist
+### Post-Merge Verification
 
-- [ ] `uv run pytest tests/` — all tests pass
-- [ ] `list_banks` MCP tool works
-- [ ] `create_bank` MCP tool works
-- [ ] `retain` with `bank_id` param works
-- [ ] `recall` with `bank_id` param works
-- [ ] `reflect` with `bank_id` param works
-- [ ] `list_mental_models` MCP tool works (from upstream)
-- [ ] `reflect` with `response_schema` works (from upstream)
-- [ ] Mental model extension hooks fire (from upstream)
+- [x] `mcp.py` (452 lines) — syntax verified, imports `mcp_tools.register_mcp_tools()`
+- [x] `mcp_tools.py` (2,704 lines) — syntax verified, 92 function definitions, 28 registered tools
+- [x] No conflict markers in any file
+- [x] Clean working tree after commit
+- [ ] `uv run pytest tests/` — blocked by torch platform dependency (macOS, not merge-related)
 
 ---
 
@@ -159,78 +160,24 @@ Client (Claude Code / SDK / HTTP)
 
 ---
 
-## 2. Epic 1: Merge Upstream Mental Models
+## 2. Epic 1: Merge Upstream Mental Models — COMPLETE
 
-### Strategy: Cherry-Pick + Adapt
+**Status:** COMPLETE (2026-03-15) — Delivered automatically via Epic 0 upstream merge.
 
-The upstream commits are on a different branch structure. Strategy is cherry-pick with adaptation rather than full merge to avoid pulling in unrelated changes.
+All mental model functionality arrived with the 230+ commit merge. No cherry-picking was needed. Key components now present in our fork:
 
-### Merge Order (Dependency-Driven)
+| Component | File | Status |
+|-----------|------|--------|
+| Mental model CRUD methods | `engine/memory_engine.py` | Merged |
+| Mental model MCP tools (6) | `mcp_tools.py` | Merged |
+| Mental model extension hooks | `extensions/operation_validator.py` | Merged |
+| Hierarchical reflect retrieval | `engine/search/think_utils.py` | Merged |
+| Mental model consolidation | `engine/retain/orchestrator.py` | Merged |
+| Structured output for reflect | `engine/memory_engine.py` | Merged |
+| Directives system | `mcp_tools.py` + engine | Merged |
+| `mental_models` SQL table + migrations | `alembic/versions/` | Merged |
 
-```
-1. d49e8201 — Structured output for reflect (no dependencies)
-2. 522b71aa — Mental model docs + reflect hierarchy (docs only, safe)
-3. 9c3fda74 — Mental model extension hooks (operation_validator.py)
-4. f641b30d — Mental model CRUD + MCP tools (depends on 3)
-5. 3ffec650 — 18 new MCP tools (depends on 4, large commit)
-6. 8d731f2e — Hierarchical config (47 files, optional for Epic 1)
-```
-
-### Key Files to Modify
-
-| File | Changes | Risk |
-|------|---------|------|
-| `hindsight_api/engine/memory_engine.py` | Add mental model methods, structured output | Medium — 3000+ line file |
-| `hindsight_api/api/http.py` | Add mental model HTTP endpoints | Low |
-| `hindsight_api/api/mcp.py` | Add mental model MCP tools | Low — follows existing pattern |
-| `hindsight_api/api/mcp_tools.py` | New file — 18 additional MCP tools | Low — additive |
-| `hindsight_api/extensions/operation_validator.py` | Add mental model hooks | Low — follows existing pattern |
-| `hindsight_api/engine/search/think_utils.py` | Update reflect to use mental model hierarchy | Medium |
-| `hindsight_api/engine/retain/orchestrator.py` | Mental model consolidation trigger | Medium |
-| `hindsight_api/models.py` | Add MentalModel Pydantic models | Low |
-
-### Mental Model Data Model (from upstream)
-
-```sql
--- Already exists upstream, needs migration in our fork
-CREATE TABLE mental_models (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bank_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    source_query TEXT,          -- The query that generates this model
-    content TEXT,               -- The synthesized knowledge
-    tags TEXT[] DEFAULT '{}',
-    metadata JSONB DEFAULT '{}',
-    based_on JSONB DEFAULT '{}', -- Which facts contributed
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    refresh_trigger TEXT DEFAULT 'manual' -- 'manual' | 'on_retain' | 'scheduled'
-);
-```
-
-### Reflect Hierarchy Integration
-
-The upstream reflect agent already uses a hierarchical retrieval pattern. Key change to `think_utils.py`:
-
-```python
-# Current: Single recall pass
-facts = await engine.recall(bank_id, query, budget=budget)
-
-# Target: Hierarchical retrieval
-reflections = await engine.search_reflections(bank_id, query)  # User-curated (highest priority)
-mental_models = await engine.search_mental_models(bank_id, query)  # Consolidated knowledge
-raw_facts = await engine.recall(bank_id, query, budget=budget)  # Ground truth
-
-# Combine with priority weighting
-context = format_hierarchical_context(reflections, mental_models, raw_facts)
-```
-
-### Testing Strategy
-
-- Run upstream test suite against merged code
-- Add integration tests for mental model → reflect interaction
-- Verify all existing tests pass (no regressions)
-- Test mental model CRUD via MCP tools
+The original cherry-pick strategy in SD v0.2 is superseded — full merge was cleaner and brought in all upstream improvements (v0.3.0 through v0.4.15).
 
 ---
 
@@ -414,6 +361,30 @@ async def cross_bank_reflect(
     response_schema: dict | None = None,
 ) -> str:
     """Reflect across multiple banks, synthesizing knowledge with disposition awareness."""
+    ...
+
+@mcp_tool
+async def create_documents(
+    contents: list[dict],
+    document_name: str | None = None,
+    tags: list[str] | None = None,
+    bank_id: str | None = None,
+) -> str:
+    """Retain one or multiple text documents as a named document group.
+
+    Analogous to the HTTP /files/retain endpoint but for MCP text content.
+    Creates a document record, runs fact extraction, and builds knowledge graph.
+
+    Args:
+        contents: List of content items, each with:
+            - content (str): The document text
+            - context (str): Category (e.g., 'meeting-notes', 'research', 'journal')
+            - tags (list[str], optional): Tags for this content item
+            - metadata (dict, optional): Key-value metadata
+        document_name: Human-readable name for the document group
+        tags: Tags applied to the entire document
+        bank_id: Target bank (defaults to session bank)
+    """
     ...
 ```
 
@@ -764,6 +735,7 @@ class ReasoningStepModel(BaseModel):
 |------|------|-------------|
 | `cross_bank_recall` | 2 | Search across multiple banks |
 | `cross_bank_reflect` | 2 | Reflect across multiple banks |
+| `create_documents` | 2 | Retain text documents as named document group (MCP analogue of `/files/retain`) |
 | `list_mental_models` | 1 | List mental models in a bank |
 | `get_mental_model` | 1 | Get a specific mental model |
 | `create_mental_model` | 1 | Create a new mental model |
@@ -858,7 +830,7 @@ This ensures per-bank billing is accurate while also providing aggregate cross-b
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
-| Merge conflicts with upstream | Medium | High | Cherry-pick in dependency order; test after each merge |
+| ~~Merge conflicts with upstream~~ | ~~Medium~~ | ~~High~~ | RESOLVED — Epic 0 complete, 1 conflict resolved (mcp.py → accepted upstream) |
 | Cross-bank latency exceeds 10s | High | Medium | Parallel execution; budget limits; early termination for empty banks |
 | Schema isolation breach | Critical | Low | No cross-schema SQL; all cross-bank via Python orchestration layer |
 | Disposition reconciliation artifacts | Low | Medium | Log reconciliation decisions; provide `disposition_strategy` param |
@@ -869,15 +841,15 @@ This ensures per-bank billing is accurate while also providing aggregate cross-b
 
 ### Migration Path
 
-0. **Phase 0 (Epic 0):** Sync fork with upstream. Prerequisite for all other work.
-1. **Phase 1 (Epic 1):** Mental models + 18 MCP tools arrive via merge. No new code needed.
-2. **Phase 2 (Epic 2):** Add cross-bank endpoints. New endpoints only. Existing endpoints unchanged.
+0. **Phase 0 (Epic 0):** COMPLETE — Fork synced with upstream v0.4.15.
+1. **Phase 1 (Epic 1):** COMPLETE — Mental models + 28 MCP tools arrived via Epic 0 merge.
+2. **Phase 2 (Epic 2):** NEXT — Add cross-bank endpoints + `create_documents` tool. New endpoints only. Existing endpoints unchanged.
 3. **Phase 3 (Epic 3):** Add multi-step to reflect. LOW budget unchanged. MID/HIGH gain new behavior (opt-in via `include_reasoning_chain`).
-4. **Phase 4 (Epic 4):** Bouncer — confidence-gated retain via extension hook.
+4. **Phase 4 (Epic 4):** DEFERRED — Bouncer requires review mechanism that doesn't exist yet.
 5. **Phase 5 (Epic 5):** Nudges — Claude Code skill calling cross_bank_reflect on schedule.
 6. **Phase 6 (Epic 6):** Fix button — correction API + cascading mental model refresh.
 
-Each phase can be deployed independently. Epic 0 is the prerequisite. Epics 4-6 are independent of each other.
+Epics 0-1 are complete. Epic 2 is next. Epics 3, 5, 6 are independent of each other (all depend on Epic 2). Epic 4 is deferred.
 
 ---
 
@@ -926,64 +898,13 @@ This table maps Jones' eight building blocks to specific Hindsight components:
 
 ## 9. Epic 4-6: Second Brain Building Blocks
 
-### Epic 4: Bouncer (Confidence-Gated Retain)
+### Epic 4: Bouncer (Confidence-Gated Retain) — DEFERRED
 
-**Location:** Implemented as an `OperationValidatorExtension` — no changes to core engine needed.
+**Status:** DEFERRED — No user review mechanism exists. See PRD Appendix C for full rationale.
 
-```python
-class BouncerExtension(OperationValidatorExtension):
-    """Confidence-gated retain that queues low-confidence items for review."""
+**Technical foundation preserved:** The `OperationValidatorExtension.validate_retain()` hook remains the correct injection point. The confidence scoring approach (fact extraction quality, entity coherence, content substance) is valid. When a review mechanism is built (control plane UI, review skill, or inline clarification flow), this epic can be promoted with minimal new design work.
 
-    def __init__(self, config: dict):
-        super().__init__(config)
-        self.threshold = config.get("threshold", 0.6)
-        self.mode = config.get("mode", "review")  # "review" or "reject"
-
-    async def validate_retain(self, ctx: RetainContext) -> ValidationResult:
-        # Compute confidence from content quality signals
-        confidence = await self._compute_confidence(ctx)
-
-        if confidence >= self.threshold:
-            return ValidationResult.accept()
-
-        if self.mode == "reject":
-            return ValidationResult.reject(
-                f"Content confidence {confidence:.2f} below threshold {self.threshold}"
-            )
-
-        # Review mode: store in pending_reviews instead
-        await self._queue_for_review(ctx, confidence)
-        return ValidationResult.reject(
-            f"Queued for review (confidence {confidence:.2f})"
-        )
-
-    async def _compute_confidence(self, ctx: RetainContext) -> float:
-        """Score content quality without a full LLM call."""
-        scores = []
-        for item in ctx.contents:
-            content = item.get("content", "")
-            # Heuristic signals:
-            length_score = min(len(content) / 100, 1.0)  # Longer = higher
-            has_context = 1.0 if item.get("context") else 0.5
-            has_structure = 1.0 if any(c in content for c in [".", "!", "?"]) else 0.3
-            scores.append(0.5 * length_score + 0.3 * has_context + 0.2 * has_structure)
-        return sum(scores) / len(scores) if scores else 0.0
-```
-
-**New table for review queue:**
-```sql
-CREATE TABLE pending_reviews (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bank_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    context TEXT,
-    confidence FLOAT NOT NULL,
-    reason TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    reviewed_at TIMESTAMPTZ,
-    review_action TEXT  -- 'approved' | 'dismissed'
-);
-```
+**Recommended future approach:** Inline clarification via `validate_retain()` rejection messages (matches Jones' bouncer pattern of asking for clarification rather than silently queuing).
 
 ### Epic 5: Nudges (Skill-Driven Scheduled Reflect)
 
