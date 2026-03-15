@@ -6,9 +6,12 @@ These models define the structure of data returned by cross-bank operations
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# Type aliases for cross-bank operations
+TagsMatch = Literal["any", "all", "any_strict", "all_strict"]
 
 
 class BankInfo(BaseModel):
@@ -240,4 +243,115 @@ class CrossBankReflectResult(BaseModel):
     new_opinions: list[dict[str, Any]] = Field(
         default_factory=list,
         description="New opinions extracted during reflection",
+    )
+
+
+class CrossBankRecallRequest(BaseModel):
+    """
+    Request model for cross-bank recall endpoint.
+
+    Allows querying multiple memory banks simultaneously with fused ranking.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "query": "What projects is Alice working on?",
+                "bank_ids": ["work-notes", "personal-notes"],
+                "bank_tags": None,
+                "max_results": 20,
+                "budget": "mid",
+                "tags": None,
+                "tags_match": "any",
+            }
+        }
+    )
+
+    query: str = Field(description="The search query to execute across banks")
+    bank_ids: list[str] | None = Field(
+        default=None,
+        description="Specific bank IDs to query. If None, queries all accessible banks.",
+    )
+    bank_tags: list[str] | None = Field(
+        default=None,
+        description="Filter banks by tags. Only banks with these tags will be queried.",
+    )
+    max_results: int = Field(
+        default=20,
+        description="Maximum total results to return after fusion",
+    )
+    budget: str = Field(
+        default="mid",
+        description="Budget level: 'low' (100 tokens), 'mid' (300 tokens), or 'high' (1000 tokens)",
+    )
+    tags: list[str] | None = Field(
+        default=None,
+        description="Filter memories by tags within each bank",
+    )
+    tags_match: TagsMatch = Field(
+        default="any",
+        description="How to match tags: 'any' (OR), 'all' (AND), 'any_strict', 'all_strict'",
+    )
+
+
+class CrossBankReflectRequest(BaseModel):
+    """
+    Request model for cross-bank reflect endpoint.
+
+    Allows disposition-aware reflection across multiple memory banks.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "query": "What do you think about our team's progress?",
+                "bank_ids": ["work-notes", "personal-notes"],
+                "bank_tags": None,
+                "budget": "mid",
+                "context": None,
+                "include_mental_models": True,
+                "include_reasoning_chain": False,
+                "response_schema": None,
+                "tags": None,
+                "tags_match": "any",
+            }
+        }
+    )
+
+    query: str = Field(description="The question to reflect on across banks")
+    bank_ids: list[str] | None = Field(
+        default=None,
+        description="Specific bank IDs to query. If None, queries all accessible banks.",
+    )
+    bank_tags: list[str] | None = Field(
+        default=None,
+        description="Filter banks by tags. Only banks with these tags will be queried.",
+    )
+    budget: str = Field(
+        default="low",
+        description="Budget level: 'low' (100 tokens), 'mid' (300 tokens), or 'high' (1000 tokens)",
+    )
+    context: str | None = Field(
+        default=None,
+        description="Additional context for the reflection",
+    )
+    include_mental_models: bool = Field(
+        default=True,
+        description="Whether to consult mental models during reflection",
+    )
+    include_reasoning_chain: bool = Field(
+        default=False,
+        description="Whether to decompose complex queries into reasoning steps",
+    )
+    response_schema: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional JSON Schema for structured output",
+    )
+    tags: list[str] | None = Field(
+        default=None,
+        description="Filter memories by tags within each bank",
+    )
+    tags_match: TagsMatch = Field(
+        default="any",
+        description="How to match tags: 'any' (OR), 'all' (AND), 'any_strict', 'all_strict'",
     )

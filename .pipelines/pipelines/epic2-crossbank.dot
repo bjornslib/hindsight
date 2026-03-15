@@ -1,0 +1,215 @@
+digraph PRD_SECONDBRAIN_001_EPIC2 {
+    graph [pipeline_id="epic2-crossbank"]
+
+    node [style=filled]
+    edge [arrowhead=vee, color=gray]
+
+    // ── Pipeline entry ──────────────────────────────────────────────
+    start [
+        shape=Mdiamond
+        handler="start"
+        status="accepted"
+        label="Start Epic 2"
+
+        fillcolor="palegreen"
+    
+        style="filled"
+    ];
+
+    // ── Phase 0: Research ───────────────────────────────────────────
+    research_crossbank [
+        shape=tab
+        handler="research"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Research cross-bank patterns"
+        llm_profile="alibaba-glm5"
+        worker_type="researcher"
+        prd_ref="PRD-SECONDBRAIN-001"
+        downstream_node="refine_sd"
+        research_queries="recall_async signatures; reflect_async signatures; register_mcp_tools pattern; operation_validator hooks; RRF fusion.py; bank_utils list_banks"
+        prompt="Research cross-bank query patterns for Hindsight memory system. Investigate: recall_async and reflect_async signatures in memory_engine.py, register_mcp_tools pattern in mcp_tools.py, operation_validator extension hooks, existing RRF in search/fusion.py, bank profiles and dispositions in bank_utils.py, list_banks API and tag filtering. Update SD-SECONDBRAIN-001.md Epic 2 section with findings."
+        solution_design="docs/SD-SECONDBRAIN-001.md"
+    
+        style="filled"
+    ];
+
+    // ── Phase 0: Refine SD ──────────────────────────────────────────
+    refine_sd [
+        shape=note
+        handler="refine"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Refine SD with research findings"
+        llm_profile="alibaba-glm5"
+        worker_type="refiner"
+        prd_ref="PRD-SECONDBRAIN-001"
+        evidence_path=".pipelines/evidence/research_crossbank/research-findings.json"
+        prompt="Refine SD-SECONDBRAIN-001.md Epic 2 section with research findings. Ensure all code patterns match actual upstream API signatures. Remove any speculative patterns."
+        solution_design="docs/SD-SECONDBRAIN-001.md"
+    
+        style="filled"
+    ];
+
+    // ── Sprint 1: Foundation (T1 + T2 + T3) ────────────────────────
+    impl_foundation [
+        shape=box
+        handler="codergen"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Sprint 1: Models + Interface + Hooks"
+        llm_profile="alibaba-glm5"
+        worker_type="backend-solutions-engineer"
+        bead_id="EPIC2-FOUNDATION"
+        prd_ref="PRD-SECONDBRAIN-001"
+        sd_path="docs/SD-SECONDBRAIN-001.md"
+        acceptance="T1: cross_bank_models.py with CrossBankFact, CrossBankRecallResult, CrossBankReflectResult, BankInfo. T2: cross_bank.py with CrossBankOrchestrator skeleton, BankSelector, BudgetAllocator stubs. T3: operation_validator.py with CrossBankRecallContext, CrossBankReflectContext, new abstract methods with default implementations."
+        prompt="Implement Sprint 1 Foundation for Epic 2 Cross-Bank Querying. T1: Create cross_bank_models.py with Pydantic models (CrossBankFact, MentalModelReference, CrossBankRecallResult, CrossBankReflectResult, BankInfo). T2: Create cross_bank.py with CrossBankOrchestrator class skeleton, BankSelector and BudgetAllocator stubs. T3: Add extension hook contexts to operation_validator.py (CrossBankRecallContext, CrossBankReflectContext dataclasses, abstract methods with default accept/no-op). Files: engine/cross_bank_models.py (NEW), engine/cross_bank.py (NEW), extensions/operation_validator.py (MODIFY). Follow patterns in response_models.py and operation_validator.py."
+        folder_path="hindsight-api/hindsight_api/"
+    
+        style="filled"
+    ];
+
+    // ── Sprint 2a: Core Recall (T4 + T5 + T6 + T7) ────────────────
+    impl_core_recall [
+        shape=box
+        handler="codergen"
+        status="accepted"
+        fillcolor="lightgreen"
+        label="Sprint 2a: BankSelector + BudgetAllocator + Recall + RRF"
+        llm_profile="alibaba-glm5"
+        worker_type="backend-solutions-engineer"
+        bead_id="EPIC2-CORE-RECALL"
+        prd_ref="PRD-SECONDBRAIN-001"
+        sd_path="docs/SD-SECONDBRAIN-001.md"
+        acceptance="T4: BankSelector.resolve() resolves from IDs, tags, or all banks. T5: BudgetAllocator.equal_split() distributes budget, no bank below LOW. T6: cross_bank_recall() runs parallel queries via asyncio.gather, handles failures gracefully. T7: RRF fusion merges results with k=60, deduplicates by entity ID."
+        prompt="Implement Sprint 2a Core Recall. T4: BankSelector.resolve() in cross_bank.py. T5: BudgetAllocator.equal_split() and proportional(). T6: CrossBankOrchestrator.cross_bank_recall() with parallel bank queries. T7: _reciprocal_rank_fusion() method. Reference search/fusion.py for RRF patterns."
+        folder_path="hindsight-api/hindsight_api/engine/"
+    
+        style="filled"
+    ];
+
+    // ── Sprint 2b: Core Reflect (T8 + T9) ──────────────────────────
+    impl_core_reflect [
+        shape=box
+        handler="codergen"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Sprint 2b: Disposition Reconciliation + Reflect"
+        llm_profile="alibaba-glm5"
+        worker_type="backend-solutions-engineer"
+        bead_id="EPIC2-CORE-REFLECT"
+        prd_ref="PRD-SECONDBRAIN-001"
+        sd_path="docs/SD-SECONDBRAIN-001.md"
+        acceptance="T8: _reconcile_dispositions() weights by fact count, stays 1-5. T9: cross_bank_reflect() gathers evidence, fuses facts, reconciles dispositions, makes single LLM synthesis call, supports response_schema."
+        prompt="Implement Sprint 2b Core Reflect. T8: _reconcile_dispositions() method weighted by fact contribution. T9: CrossBankOrchestrator.cross_bank_reflect() with parallel evidence gathering, RRF fusion, mental model collection, disposition reconciliation, and LLM synthesis. Reference memory_engine.py reflect_async() for LLM call patterns."
+        folder_path="hindsight-api/hindsight_api/engine/"
+
+        style="filled"
+    ];
+
+    // ── Core validation: wait.system3 ───────────────────────────────
+    gate_core_s3 [
+        shape=hexagon
+        handler="wait.system3"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Validate Core Engine"
+        gate_type="e2e"
+        timeout=3600
+    ];
+
+    // ── Core validation: wait.human ─────────────────────────────────
+    gate_core_human [
+        shape=hexagon
+        handler="wait.human"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Review Core Engine"
+        gate="technical"
+        mode="technical"
+        platform=gchat
+        timeout=86400
+    ];
+
+    // ── Sprint 3: API Surface (T10 + T11 + T12 + T13) ──────────────
+    impl_api_surface [
+        shape=box
+        handler="codergen"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Sprint 3: HTTP + MCP Tools + Hooks"
+        llm_profile="alibaba-glm5"
+        worker_type="backend-solutions-engineer"
+        bead_id="EPIC2-API-SURFACE"
+        prd_ref="PRD-SECONDBRAIN-001"
+        sd_path="docs/SD-SECONDBRAIN-001.md"
+        acceptance="T10: POST /v1/default/cross-bank/recall and /reflect endpoints. T11: cross_bank_recall and cross_bank_reflect MCP tools (multi-bank only). T12: create_documents MCP tool. T13: Extension hook wiring with pre/post hooks."
+        prompt="Implement Sprint 3 API Surface. T10: HTTP endpoints in api/http.py for cross-bank recall and reflect. T11: MCP tools in mcp_tools.py for cross_bank_recall and cross_bank_reflect (multi-bank only). T12: create_documents MCP tool. T13: Wire extension hooks in cross_bank.py. Follow existing patterns in http.py and mcp_tools.py."
+        folder_path="hindsight-api/hindsight_api/"
+    ];
+
+    // ── Sprint 4: Tests (T14 + T15 + T16 + T17 + T18) ──────────────
+    impl_tests [
+        shape=box
+        handler="codergen"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Sprint 4: Unit + Integration + MCP + Hook Tests"
+        llm_profile="alibaba-glm5"
+        worker_type="backend-solutions-engineer"
+        bead_id="EPIC2-TESTS"
+        prd_ref="PRD-SECONDBRAIN-001"
+        sd_path="docs/SD-SECONDBRAIN-001.md"
+        acceptance="T14: Unit tests for models, BankSelector, BudgetAllocator, RRF, disposition. T15: Integration tests for cross_bank_recall. T16: Integration tests for cross_bank_reflect. T17: MCP tool tests. T18: Extension hook tests."
+        prompt="Implement Sprint 4 Test Suite. T14: test_cross_bank_unit.py. T15: test_cross_bank_recall.py. T16: test_cross_bank_reflect.py. T17: test_cross_bank_mcp.py. T18: test_cross_bank_hooks.py. Use mocked MemoryEngine to avoid torch dependency. Follow existing test patterns."
+        folder_path="hindsight-api/tests/"
+    ];
+
+    // ── Final validation: wait.system3 ──────────────────────────────
+    gate_final_s3 [
+        shape=hexagon
+        handler="wait.system3"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Final E2E Validation"
+        gate_type="e2e"
+        timeout=3600
+    ];
+
+    // ── Final validation: wait.human ────────────────────────────────
+    gate_final_human [
+        shape=hexagon
+        handler="wait.human"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Final Human Review"
+        gate="e2e"
+        mode="business"
+        platform=gchat
+        timeout=86400
+    ];
+
+    // ── Pipeline exit ───────────────────────────────────────────────
+    finish [
+        shape=Msquare
+        handler="exit"
+        status="accepted"
+        fillcolor="palegreen"
+        label="Epic 2 Complete"
+    ];
+
+    // ── Execution flow ──────────────────────────────────────────────
+    start -> research_crossbank;
+    research_crossbank -> refine_sd;
+    refine_sd -> impl_foundation;
+    impl_foundation -> impl_core_recall;
+    impl_core_recall -> impl_core_reflect;
+    impl_core_reflect -> gate_core_s3;
+    gate_core_s3 -> gate_core_human;
+    gate_core_human -> impl_api_surface;
+    impl_api_surface -> impl_tests;
+    impl_tests -> gate_final_s3;
+    gate_final_s3 -> gate_final_human;
+    gate_final_human -> finish;
+}

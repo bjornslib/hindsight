@@ -57,3 +57,20 @@ TASK.md
 # CHANGELOG.md
 
 blog-post*
+
+# Claude Code runtime files (not version controlled)
+# Directories are kept via .gitkeep, but contents are ignored
+.claude/state/*
+!.claude/state/.gitkeep
+.claude/completion-state/*
+!.claude/completion-state/.gitkeep
+.claude/progress/*
+!.claude/progress/.gitkeep
+.claude/worker-assignments/*
+!.claude/worker-assignments/.gitkeep
+.claude/logs/
+.claude/*.log
+.claude/settings.local.json
+
+# CoBuilder engine secrets
+cobuilder/engine/.env
