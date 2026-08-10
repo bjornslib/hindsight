@@ -87,6 +87,40 @@ check_pg0_writable() {
     return 1
 }
 
+# =============================================================================
+# Resolve the pg0 bin directory dynamically (do NOT hardcode a PG version)
+#
+# pg0-embedded installs PostgreSQL binaries under
+# /home/hindsight/.pg0/installation/<version>/bin. The bundled version can
+# change across pg0-embedded releases, so hardcoding a version string here
+# silently breaks backup/restore the moment it's bumped. The installation
+# dir lives on the persistent data volume, so a version bump can leave an
+# OLD installation directory sitting alongside the new one — a plain glob
+# expands lexicographically and would silently pick the stale binaries
+# (e.g. 18.1.0 over 18.10.0). Sort by version (newest first) instead, skip
+# any candidate missing psql/pg_dump, and fail loudly if nothing usable is
+# found.
+# =============================================================================
+resolve_pg0_bin() {
+    local base="/home/hindsight/.pg0/installation"
+    local candidate version
+
+    for version in $(
+        for d in "$base"/*/; do
+            [ -d "$d" ] || continue
+            basename "$d"
+        done 2>/dev/null | sort -Vr
+    ); do
+        candidate="$base/$version/bin"
+        if [ -x "$candidate/psql" ] && [ -x "$candidate/pg_dump" ]; then
+            echo "[pg0] Using pg0 binaries from $candidate" >&2
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 if [ "${HINDSIGHT_START_ALL_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -253,6 +287,45 @@ if [ "$ENABLE_API" = "true" ]; then
         echo "❌ API did not become healthy within ${API_STARTUP_WAIT_SECONDS}s"
         exit 1
     fi
+
+    # =========================================================================
+    # Auto-restore (DISABLED BY DEFAULT — set HINDSIGHT_AUTO_RESTORE=true)
+    #
+    # Restores the largest backup when memory_units is empty. This is
+    # dangerous right after a schema migration: a partially-applied migration
+    # can present as 0 rows, and blindly restoring an old-schema dump onto a
+    # new-schema database would corrupt it. Off by default; opt in only when
+    # you are sure the schema is stable.
+    # =========================================================================
+    if [ -z "${HINDSIGHT_API_DATABASE_URL:-}" ]; then
+        if [ "${HINDSIGHT_AUTO_RESTORE:-false}" = "true" ]; then
+            PG_BIN="$(resolve_pg0_bin)" || {
+                echo "❌ [auto-restore] Could not locate psql/pg_dump under /home/hindsight/.pg0/installation/*/bin"
+                exit 1
+            }
+            BACKUP_DIR="/home/hindsight/.pg0/backups"
+            MU_COUNT=$(PGPASSWORD=hindsight "$PG_BIN/psql" -U hindsight -h 127.0.0.1 -p 5432 -d hindsight -t -A -c "SELECT COUNT(*) FROM memory_units" 2>/dev/null || echo "-1")
+            if [ "$MU_COUNT" = "0" ]; then
+                BEST_BACKUP=$(ls -S "$BACKUP_DIR"/hindsight-*.sql.gz 2>/dev/null | head -1)
+                if [ -n "$BEST_BACKUP" ]; then
+                    BACKUP_SIZE=$(stat -c%s "$BEST_BACKUP" 2>/dev/null || stat -f%z "$BEST_BACKUP" 2>/dev/null || echo "0")
+                    if [ "$BACKUP_SIZE" -gt 10000 ]; then
+                        echo "[auto-restore] WARNING: Database is empty but backup exists!"
+                        echo "[auto-restore] Restoring from: $BEST_BACKUP ($(du -h "$BEST_BACKUP" | cut -f1))"
+                        gunzip -c "$BEST_BACKUP" | PGPASSWORD=hindsight "$PG_BIN/psql" -U hindsight -h 127.0.0.1 -p 5432 -d hindsight -q 2>&1 | tail -5
+                        NEW_COUNT=$(PGPASSWORD=hindsight "$PG_BIN/psql" -U hindsight -h 127.0.0.1 -p 5432 -d hindsight -t -A -c "SELECT COUNT(*) FROM memory_units" 2>/dev/null || echo "0")
+                        echo "[auto-restore] Restored $NEW_COUNT memory units from backup"
+                    else
+                        echo "[auto-restore] WARNING: Database is empty and no good backup found (largest is only $BACKUP_SIZE bytes)"
+                    fi
+                else
+                    echo "[auto-restore] WARNING: Database is empty and no backups found in $BACKUP_DIR"
+                fi
+            fi
+        else
+            echo "⏭️  [auto-restore] Skipped (set HINDSIGHT_AUTO_RESTORE=true to enable restoring from backup when memory_units is empty)"
+        fi
+    fi
 else
     echo "API disabled (HINDSIGHT_ENABLE_API=false)"
 fi
@@ -267,6 +340,57 @@ if [ "$ENABLE_CP" = "true" ]; then
     PIDS+=($CP_PID)
 else
     echo "Control Plane disabled (HINDSIGHT_ENABLE_CP=false)"
+fi
+
+# =============================================================================
+# Automated pg_dump backup loop (embedded pg0 only)
+#
+# This is a local invention, not part of upstream: periodically dumps the
+# database so a bad restart / OOM kill doesn't lose everything. Only runs
+# when the API is enabled and an external database is NOT configured (i.e.
+# we're using embedded pg0 — an external DB is assumed to have its own
+# backup story).
+# =============================================================================
+BACKUP_INTERVAL="${HINDSIGHT_BACKUP_INTERVAL_HOURS:-12}"
+BACKUP_KEEP="${HINDSIGHT_BACKUP_KEEP:-7}"
+if [ "$ENABLE_API" = "true" ] && [ -z "${HINDSIGHT_API_DATABASE_URL:-}" ]; then
+    BACKUP_DIR="/home/hindsight/.pg0/backups"
+    mkdir -p "$BACKUP_DIR"
+    (
+        # Wait for PG to be fully ready
+        sleep 30
+        PG_BIN="$(resolve_pg0_bin)" || {
+            echo "❌ [backup] Could not locate psql/pg_dump under /home/hindsight/.pg0/installation/*/bin — backups disabled"
+            exit 1
+        }
+        while true; do
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            DUMP_FILE="${BACKUP_DIR}/hindsight-${TIMESTAMP}.sql.gz"
+            # Safety check: skip backup if DB appears empty (prevents overwriting good backups after OOM crash)
+            ROW_COUNT=$(PGPASSWORD=hindsight "$PG_BIN/psql" -U hindsight -h 127.0.0.1 -p 5432 -d hindsight -t -A -c "SELECT COUNT(*) FROM memory_units" 2>/dev/null || echo "0")
+            if [ "$ROW_COUNT" -eq 0 ] 2>/dev/null; then
+                echo "[backup] WARNING: memory_units is empty — skipping backup to protect existing backups"
+                sleep $((BACKUP_INTERVAL * 3600))
+                continue
+            fi
+            if PGPASSWORD=hindsight "$PG_BIN/pg_dump" -U hindsight -h 127.0.0.1 -p 5432 -d hindsight 2>/dev/null | gzip > "$DUMP_FILE"; then
+                SIZE=$(du -sh "$DUMP_FILE" | cut -f1)
+                echo "[backup] pg_dump completed: $DUMP_FILE ($SIZE)"
+                # Prune old backups, keep most recent N
+                ls -t "$BACKUP_DIR"/hindsight-*.sql.gz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | while read f; do
+                    echo "[backup] Pruning old backup: $f"
+                    rm -f "$f"
+                done
+            else
+                echo "[backup] WARNING: pg_dump failed at $TIMESTAMP"
+                rm -f "$DUMP_FILE"
+            fi
+            sleep $((BACKUP_INTERVAL * 3600))
+        done
+    ) &
+    BACKUP_PID=$!
+    PIDS+=($BACKUP_PID)
+    echo "📦 Automated backups: every ${BACKUP_INTERVAL}h, keeping ${BACKUP_KEEP} (dir: $BACKUP_DIR)"
 fi
 
 # Print status

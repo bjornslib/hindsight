@@ -91,6 +91,19 @@ _TOOL_CHOICE_REQUIRED_UNSUPPORTED_PROVIDERS = frozenset({"lmstudio", "ollama"})
 # provider-specific and must be supplied verbatim.
 _V1_PATH_LOCAL_PROVIDERS = frozenset({"lmstudio", "ollama"})
 
+# gpt-oss emits its reasoning through a separate `thinking` field and returns
+# an EMPTY `message.content` when thinking is disabled via `"think": false` in
+# Ollama's native /api/chat payload. Sending `think:false` for gpt-oss
+# therefore silently produces no output at all (reproduced deterministically:
+# same prompt + schema, only `think` differing, content length 0 vs 1308).
+# Other reasoning models (e.g. qwen3.5) behave correctly with `think:false`,
+# which is why that default exists — so for gpt-oss we omit the `think` key
+# entirely instead of flipping it to true.
+def _is_gpt_oss_model(model_name: str) -> bool:
+    """Match gpt-oss model names, case-insensitively, with or without a
+    registry namespace prefix (e.g. "gpt-oss:20b", "library/gpt-oss:20b")."""
+    return "gpt-oss" in model_name.lower()
+
 
 def _ensure_v1_base_url(base_url: str) -> str:
     """Append the OpenAI-compatible ``/v1`` prefix to a bare local base URL.
@@ -1463,8 +1476,13 @@ class OpenAICompatibleLLM(LLMInterface):
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "think": False,  # Disable thinking for reasoning models (qwen3.5, etc.)
         }
+        # Disable thinking for reasoning models (qwen3.5, etc.) — except
+        # gpt-oss, which returns empty content when think:false is set.
+        # See _is_gpt_oss_model for details. Key is omitted (not set to
+        # true) for gpt-oss.
+        if not _is_gpt_oss_model(self.model):
+            payload["think"] = False
 
         # Add schema as format parameter for structured output
         if schema:

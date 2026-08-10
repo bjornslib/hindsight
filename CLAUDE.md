@@ -76,6 +76,66 @@ cd hindsight-control-plane && npm run dev
 ./scripts/benchmarks/start-visualizer.sh  # View results at localhost:8001
 ```
 
+### Docker Backup & Restore
+
+This is a local fork customisation — upstream has no backup logic. There are four layers:
+
+1. **In-container `pg_dump` loop** (`docker/standalone/start-all.sh`): runs every
+   `HINDSIGHT_BACKUP_INTERVAL_HOURS` hours (default 12), keeps `HINDSIGHT_BACKUP_KEEP` dumps
+   (default 7), writes gzipped dumps to `/home/hindsight/.pg0/backups/` **inside** the
+   `hindsight-data` volume. It skips the dump when `memory_units` is empty, so an
+   OOM-corrupted database can't overwrite good backups. Because the dumps live inside the same
+   volume, this layer is not an independent safeguard against volume loss or a bad migration.
+
+2. **Host-side copy** (`scripts/backup-hindsight.sh`), scheduled via **launchd**
+   (`~/Library/LaunchAgents/io.hindsight.backup.plist`, `StartCalendarInterval` Hour 12 — runs
+   once daily at 12:00, not cron, not 2am). It only copies existing in-container dumps out to
+   `~/.hindsight-backups/`, it does not create new ones, so the freshest host copy can lag the
+   in-container dump by up to 12h.
+   - The scheduled job runs the copy at `~/.hindsight-backups/bin/backup-hindsight.sh`, **not**
+     the repo copy — it was relocated because macOS TCC denies launchd read access under
+     `~/Documents`. If you change the backup script, copy it to `~/.hindsight-backups/bin/` too,
+     or the scheduled job keeps running the stale version.
+   - It resolves the docker CLI via a `DOCKER_BIN` variable rather than a bare `docker`, since
+     launchd jobs get a minimal `PATH` without `/usr/local/bin`.
+
+3. **Volume-level copy** (`docker/backup-volume.sh [name]`): manual, creates a full
+   `hindsight-data-backup-<name>` volume snapshot.
+
+4. **Startup auto-restore** (`start-all.sh`): restores the largest backup on startup when
+   `memory_units` is 0. **Disabled by default** — only runs when `HINDSIGHT_AUTO_RESTORE=true`
+   (logs a skip line otherwise). It stays off because a partially-applied schema migration can
+   also present as 0 rows; auto-restoring in that case would silently overwrite a new-schema
+   database with an old-schema dump and corrupt it.
+
+Related: `resolve_pg0_bin()` in `start-all.sh` picks the PostgreSQL binaries by globbing
+`/home/hindsight/.pg0/installation/*/bin` and taking the newest via `sort -Vr`, instead of
+hardcoding a version — the installation directory lives inside the persistent volume, so a
+`pg0-embedded` upgrade can leave multiple versions side by side, and a plain lexicographic sort
+would pick a stale one (e.g. `18.1.0` sorts before `18.10.0`). It logs the directory it chose.
+
+```bash
+./scripts/backup-hindsight.sh --list          # list host + in-container backups
+./scripts/backup-hindsight.sh                 # manual host-side copy now
+./scripts/restore-hindsight.sh                # interactive restore (confirms first)
+./scripts/restore-hindsight.sh --dry-run
+./docker/backup-volume.sh [name]              # volume-level copy
+launchctl list | grep hindsight               # 2nd column is last exit status; 0 = healthy
+tail -20 ~/.hindsight-backups/backup.log
+```
+
+**Verifying backups actually work**: this pipeline previously failed silently for about four
+months (~2026-04-13 to 2026-08-10) without anyone noticing. Don't assume it's healthy —
+check `launchctl list | grep hindsight` shows exit status `0`, and confirm a dump dated today
+exists in `~/.hindsight-backups/`. A stale newest-file there is the symptom to watch for.
+
+### Known Local Fork Drift
+
+`hindsight-api-slim/hindsight_api/engine/providers/openai_compatible_llm.py` omits Ollama's
+`think` key for `gpt-oss` models. Upstream hardcodes `"think": false`, which makes `gpt-oss`
+return empty content and breaks retain/consolidation/reflect. See
+`reports/upstream-bug-gpt-oss-think.md`. Revert this local change once upstream fixes it.
+
 ## Architecture
 
 ### Monorepo Structure
@@ -119,7 +179,7 @@ Main operations:
 ### Database
 PostgreSQL with pgvector. Schema managed via Alembic migrations in `hindsight-api-slim/hindsight_api/alembic/`. Migrations run automatically on API startup.
 
-Key tables: `banks`, `memory_units`, `documents`, `entities`, `entity_links`
+Key tables: `banks`, `memory_units`, `documents`, `entities`, `unit_entities`
 
 ### Adding Database Migrations
 
