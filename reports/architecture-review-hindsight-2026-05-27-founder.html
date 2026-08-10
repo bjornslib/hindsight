@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codebase Health Audit — Hindsight Founder Report 2026-05-27</title>
+<style>
+:root {
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --rust:     #B04A3F;
+  --sky:      #6A8CAF;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+  --white:    #FFFFFF;
+  --serif: ui-serif, Georgia, 'Times New Roman', serif;
+  --sans:  system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono:  ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--sans); background: var(--ivory); color: var(--gray-700); line-height: 1.55; padding: 56px 32px 120px; -webkit-font-smoothing: antialiased; }
+.page { max-width: 1120px; margin: 0 auto; }
+h1 { font-family: var(--serif); font-weight: 500; font-size: 38px; line-height: 1.15; color: var(--slate); letter-spacing: -0.01em; }
+h2 { font-family: var(--serif); font-weight: 500; font-size: 26px; color: var(--slate); letter-spacing: -0.01em; }
+h3 { font-family: var(--serif); font-weight: 500; font-size: 19px; color: var(--slate); }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gray-500); }
+.lead { font-size: 17px; line-height: 1.6; color: var(--gray-700); max-width: 640px; }
+p { font-size: 15px; margin-bottom: 12px; max-width: 720px; }
+header.page-head { margin-bottom: 48px; max-width: 820px; }
+.prompt-box { background: var(--gray-150); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 16px 20px; font-size: 14.5px; color: var(--gray-700); }
+.prompt-box .label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); display: block; margin-bottom: 6px; }
+.card { background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 20px; }
+.card-head { padding: 16px 20px; border-bottom: 1.5px solid var(--gray-300); display: flex; align-items: center; gap: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; border: 1.5px solid var(--gray-300); font-family: var(--mono); font-size: 12.5px; color: var(--slate); background: var(--white); }
+.tag { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 6px; border: 1.5px solid var(--gray-300); background: var(--gray-150); }
+.tag.safe   { background: rgba(120,140,93,0.12); border-color: rgba(120,140,93,0.4); color: var(--olive); }
+.tag.medium { background: var(--oat); color: #7A6A4F; }
+.tag.risk   { background: rgba(217,119,87,0.12); border-color: rgba(217,119,87,0.45); color: var(--clay); }
+.tag.critical { background: rgba(176,74,63,0.12); border-color: rgba(176,74,63,0.4); color: var(--rust); }
+.tag.notice { background: rgba(106,140,175,0.12); border-color: rgba(106,140,175,0.4); color: var(--sky); }
+.risk-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.risk-dot.safe   { background: var(--olive); }
+.risk-dot.medium { background: #B89B6E; }
+.risk-dot.risk   { background: var(--clay); }
+.risk-dot.critical { background: var(--rust); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+thead th { font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); text-align: left; padding: 10px 14px; border-bottom: 1.5px solid var(--gray-300); }
+tbody td { padding: 12px 14px; border-bottom: 1px solid var(--gray-150); color: var(--gray-700); }
+tbody tr:hover { background: var(--gray-150); }
+code { font-family: var(--mono); font-size: 13px; }
+section { margin-bottom: 64px; }
+.sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+.sec-head .num { font-family: var(--mono); font-size: 12px; background: var(--oat); color: var(--slate); padding: 3px 9px; border-radius: 8px; }
+.sec-intro { font-size: 14.5px; color: var(--gray-500); max-width: 720px; margin-bottom: 28px; }
+.bubble { position: relative; background: var(--white); border: 1.5px solid var(--gray-300); border-left-width: 4px; border-radius: 8px; padding: 12px 14px 12px 16px; margin-bottom: 24px; }
+.bubble.blocking { border-left-color: var(--rust); }
+.bubble.risk     { border-left-color: var(--clay); }
+.bubble.medium   { border-left-color: #B89B6E; }
+.bubble.pass     { border-left-color: var(--olive); }
+.bubble .text { font-size: 13.5px; line-height: 1.55; color: var(--gray-700); }
+.bubble .author { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.author-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; }
+.severity-right { flex-shrink: 0; margin-left: 12px; }
+.score-bar-track { height: 8px; background: var(--gray-150); border-radius: 4px; overflow: hidden; }
+.score-bar-fill { height: 100%; border-radius: 4px; }
+.score-bar-fill.safe { background: var(--olive); }
+.score-bar-fill.medium { background: #B89B6E; }
+.score-bar-fill.risk { background: var(--clay); }
+.score-bar-fill.critical { background: var(--rust); }
+.bar-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--gray-500); margin-bottom: 4px; }
+.impact-tag { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 8px; border-radius: 5px; margin-right: 6px; }
+.impact-tag.security { background: rgba(176,74,63,0.08); border: 1.5px solid rgba(176,74,63,0.3); color: var(--rust); }
+.impact-tag.scaling { background: rgba(106,140,175,0.08); border: 1.5px solid rgba(106,140,175,0.3); color: var(--sky); }
+.impact-tag.maintainability { background: rgba(217,119,87,0.08); border: 1.5px solid rgba(217,119,87,0.3); color: var(--clay); }
+.impact-tag.compliance { background: rgba(120,140,93,0.08); border: 1.5px solid rgba(120,140,93,0.3); color: var(--olive); }
+.impact-tag.reputational { background: rgba(141,110,180,0.08); border: 1.5px solid rgba(141,110,180,0.3); color: #8D6EB4; }
+.impact-tag.financial { background: rgba(184,155,110,0.08); border: 1.5px solid rgba(184,155,110,0.3); color: #7A6A4F; }
+.impact-tag.technical-debt { background: rgba(141,110,180,0.08); border: 1.5px solid rgba(141,110,180,0.3); color: #8D6EB4; }
+.grade-card { text-align: center; padding: 32px 24px; }
+.grade-letter { font-family: var(--serif); font-size: 72px; font-weight: 600; line-height: 1; letter-spacing: -0.03em; }
+.grade-label { font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); margin-top: 8px; }
+.stat-card { text-align: center; padding: 24px 16px; }
+.stat-card .stat-value { font-family: var(--serif); font-size: 36px; font-weight: 500; color: var(--slate); }
+.stat-card .stat-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); margin-top: 6px; }
+.ai-prompt-block { background: var(--slate); color: #E8E6DC; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; padding: 14px 16px; border-radius: 8px; overflow-x: auto; margin: 10px 0; position: relative; }
+.ai-prompt-block .copy-btn { position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.1); color: var(--gray-300); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; font-family: var(--mono); font-size: 10px; padding: 4px 8px; cursor: pointer; }
+.ai-prompt-block .copy-btn:hover { background: rgba(255,255,255,0.2); }
+.exec-summary { background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 24px; margin-bottom: 32px; }
+.exec-headline { font-family: var(--serif); font-size: 22px; font-weight: 500; color: var(--slate); margin-bottom: 14px; line-height: 1.3; }
+.exec-meaning { background: var(--gray-150); border: 1.5px solid var(--gray-300); border-radius: 8px; padding: 16px 18px; margin-top: 14px; }
+.exec-meaning .label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); display: block; margin-bottom: 8px; }
+.exec-meaning p { font-size: 14.5px; line-height: 1.6; color: var(--gray-700); margin-bottom: 8px; }
+.exec-meaning p:last-child { margin-bottom: 0; }
+.nav-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 32px; }
+.nav-strip a { text-decoration: none; }
+.nav-strip .chip { transition: border-color 0.15s; }
+.nav-strip .chip:hover { border-color: var(--gray-500); }
+.related-finding { font-size: 12.5px; color: var(--gray-500); }
+.related-finding a { color: var(--sky); text-decoration: none; }
+.related-finding a:hover { text-decoration: underline; }
+.grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 24px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.text-mono { font-family: var(--mono); }
+.text-small { font-size: 12px; color: var(--gray-500); }
+.color-safe  { color: var(--olive); }
+.color-risk  { color: var(--clay); }
+.color-crit  { color: var(--rust); }
+.color-info  { color: var(--sky); }
+.mb-24 { margin-bottom: 24px; }
+.mb-16 { margin-bottom: 16px; }
+@media (max-width: 900px) {
+  .grid-4 { grid-template-columns: 1fr 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
+  body { padding: 32px 20px 80px; }
+  h1 { font-size: 28px; }
+  .author-left { flex-wrap: wrap; }
+}
+@media (max-width: 600px) {
+  .grid-4 { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- HEADER -->
+<header class="page-head">
+  <div class="eyebrow">CODEBASE HEALTH AUDIT — NON-TECHNICAL FOUNDERS</div>
+  <h1>Your Product's Safety and Scalability Check</h1>
+  <p class="lead">This report tells you whether your codebase is <strong>safe to scale, hand off, or take to investors</strong>. Written in plain language with business impact first.</p>
+  <div class="prompt-box">
+    <span class="label">What was scanned</span>
+    Full-spectrum audit of the Hindsight codebase: security, architecture, code quality, scaling, maintainability, dependency health, and test coverage. Four-tier adversarial review (P0 → P1 → P2 → Pass spot-check) with deterministic scoring.
+  </div>
+</header>
+
+<!-- NAV -->
+<nav class="nav-strip">
+  <a href="#summary"><div class="chip"><span class="risk-dot" style="background:var(--clay);"></span> Executive Summary</div></a>
+  <a href="#health-score"><div class="chip"><span class="risk-dot safe"></span> Health Score</div></a>
+  <a href="#findings"><div class="chip"><span class="risk-dot" style="background:var(--rust);"></span> Warnings (5)</div></a>
+  <a href="#plan-items"><div class="chip"><span class="risk-dot medium"></span> Plan Items (21)</div></a>
+  <a href="#plan"><div class="chip">Remediation Plan</div></a>
+  <a href="#passed"><div class="chip"><span class="risk-dot safe"></span> Passed (7)</div></a>
+  <a href="architecture-review-hindsight-2026-05-27-technical.html"><div class="chip" style="background:rgba(106,140,175,0.12);border-color:rgba(106,140,175,0.4);"><span class="risk-dot" style="background:var(--sky);"></span> Technical Deep-Dive &rarr;</div></a>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- EXECUTIVE SUMMARY -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section id="summary">
+  <div class="sec-head"><div class="num">00</div><h2>Executive Summary</h2></div>
+
+  <div class="exec-summary">
+    <div class="exec-headline">
+      No immediately exploitable vulnerabilities, but your API is wide open to abuse and one 7,000-line file is slowing your team down. Fix security defaults and start decomposing the god class before scaling.
+    </div>
+    <p style="font-size:15px;color:var(--gray-700);margin-bottom:0;">
+      Security scored 75/100 — no P0 blockers, but three findings compound: no CORS policy, no rate limiting, and raw error messages leak schema details to unauthenticated clients. Architecture is 81/100 — dragged down by a single 7,000-line file that handles everything. The good news: dependency health (90), testing (90), and code quality (94) are strong. The foundation is sound; it's the default configuration and structural debt that need attention.
+    </p>
+
+    <div class="exec-meaning">
+      <span class="label">What This Means For You</span>
+      <p><strong>Add CORS and rate limiting before exposing the API to the internet.</strong> Right now, any origin can call your API with unlimited frequency. Combined with the default no-auth mode and raw error messages, an internet-facing deployment would expose database schema details to anyone who asks.</p>
+      <p><strong>Do not add a second engineer before addressing the 7,000-line MemoryEngine.</strong> Every change in that file risks breaking something unrelated. Unit tests don't exist yet (the test seam does), and the file combines 8 distinct responsibilities. Clean architecture is what makes teams fast.</p>
+      <p><strong>If you're preparing for investor diligence,</strong> fix SEC-03 (CORS + rate limiting), start the MemoryEngine decomposition (ARCH-01), and make torch optional (DEP-02). These three items will show up in any technical review. The rest can be phased.</p>
+    </div>
+
+    <h3 style="margin:18px 0 10px;font-family:var(--serif);font-size:19px;color:var(--slate);">Top Findings</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      <div class="bubble risk" style="border-left-color:var(--clay);">
+        <div class="author"><span class="tag risk">Warning</span> <span class="tag medium">Medium Change</span></div>
+        <div class="text"><strong>SEC-03:</strong> Your API has no CORS policy and no rate limiting — any website can call it, as fast as it wants, with no throttle.</div>
+      </div>
+      <div class="bubble risk" style="border-left-color:var(--clay);">
+        <div class="author"><span class="tag risk">Warning</span> <span class="tag critical">Large Feature or Migration</span></div>
+        <div class="text"><strong>ARCH-01:</strong> MemoryEngine is a 7,000-line god class — every change risks breaking something unrelated. Needs decomposition.</div>
+      </div>
+      <div class="bubble risk" style="border-left-color:var(--clay);">
+        <div class="author"><span class="tag risk">Warning</span> <span class="tag medium">Medium Change</span></div>
+        <div class="text"><strong>SCA-01:</strong> No rate limiting on LLM calls — a burst of requests can exhaust your provider quota and budget.</div>
+      </div>
+      <div class="bubble risk" style="border-left-color:var(--clay);">
+        <div class="author"><span class="tag risk">Warning</span> <span class="tag medium">Medium Change</span></div>
+        <div class="text"><strong>TST-01:</strong> Core engine has zero dedicated unit tests. A 7,000-line file with no unit tests means refactoring is dangerous.</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div class="bubble risk" style="border-left-color:var(--clay);">
+        <div class="author"><span class="tag risk">Warning</span> <span class="tag medium">Medium Change</span></div>
+        <div class="text"><strong>DEP-02:</strong> Every production install ships a 2GB AI library (torch) that most deployments never use. Remove it from defaults.</div>
+      </div>
+    </div>
+
+    <h3 style="margin:18px 0 10px;font-family:var(--serif);font-size:19px;color:var(--slate);">Remediation Plan at a Glance</h3>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+      <div class="card" style="text-align:center;">
+        <div class="stat-value" style="color:var(--olive);">3</div>
+        <div class="stat-label">Bugfix</div>
+      </div>
+      <div class="card" style="text-align:center;">
+        <div class="stat-value" style="color:#B89B6E;">11</div>
+        <div class="stat-label">Small Change</div>
+      </div>
+      <div class="card" style="text-align:center;">
+        <div class="stat-value" style="color:var(--clay);">9</div>
+        <div class="stat-label">Medium Change</div>
+      </div>
+      <div class="card" style="text-align:center;">
+        <div class="stat-value" style="color:var(--rust);">3</div>
+        <div class="stat-label">Large Feature or Migration</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HEALTH SCORE -->
+<section id="health-score">
+  <div class="sec-head"><div class="num">01</div><h2>Health Score</h2></div>
+
+  <div class="grid-4 mb-24">
+    <div class="card grade-card">
+      <div class="grade-letter" style="color:var(--clay);">B</div>
+      <div class="grade-label">Overall Grade</div>
+    </div>
+    <div class="card stat-card"><div class="stat-value">84.9</div><div class="stat-label">Health Score / 100</div></div>
+    <div class="card stat-card"><div class="stat-value color-risk">5</div><div class="stat-label">Warnings (P1)</div></div>
+    <div class="card stat-card"><div class="stat-value" style="color:#B89B6E;">21</div><div class="stat-label">Plan items (P2)</div></div>
+  </div>
+
+  <h3 class="mb-16">Category Scores</h3>
+
+  <div class="card mb-24">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;">
+
+      <div>
+        <div class="bar-label"><span title="(0 P0, 1 P1, 6 P2 → 75/100)">Security</span><span style="color:var(--clay);">75/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill risk" style="width:75%;"></div></div>
+
+        <div class="bar-label" style="margin-top:10px;"><span title="(0 P0, 1 P1, 4 P2 → 81/100)">Architecture</span><span style="color:var(--clay);">81/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill risk" style="width:81%;"></div></div>
+
+        <div class="bar-label" style="margin-top:10px;"><span title="(0 P0, 0 P1, 2 P2 → 94/100)">Code Quality</span><span style="color:var(--olive);">94/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill safe" style="width:94%;"></div></div>
+
+        <div class="bar-label" style="margin-top:10px;"><span title="(0 P0, 1 P1, 3 P2 → 84/100)">Scaling</span><span style="color:var(--clay);">84/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill risk" style="width:84%;"></div></div>
+      </div>
+
+      <div>
+        <div class="bar-label"><span title="(0 P0, 0 P1, 1 P2 → 97/100)">Maintainability</span><span style="color:var(--olive);">97/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill safe" style="width:97%;"></div></div>
+
+        <div class="bar-label" style="margin-top:10px;"><span title="(0 P0, 0 P1, 3 P2 → 91/100)">Technical Debt</span><span style="color:var(--olive);">91/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill safe" style="width:91%;"></div></div>
+
+        <div class="bar-label" style="margin-top:10px;"><span title="(0 P0, 1 P1, 1 P2 → 90/100)">Dependency Health</span><span style="color:var(--olive);">90/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill safe" style="width:90%;"></div></div>
+
+        <div class="bar-label" style="margin-top:10px;"><span title="(0 P0, 1 P1, 1 P2 → 90/100)">Testing</span><span style="color:var(--olive);">90/100</span></div>
+        <div class="score-bar-track"><div class="score-bar-fill safe" style="width:90%;"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="text-small" style="margin-top:-12px;">Weighted average: Security 25%, Architecture 20%, Code Quality 15%, Scaling 15%, Maintainability 10%, Technical Debt 5%, Dependency Health 5%, Testing 5%. Grade: ≥90 A, ≥75 B, ≥60 C, ≥50 D, &lt;50 F.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- P1 WARNING FINDINGS -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section id="findings">
+  <div class="sec-head"><div class="num">02</div><h2>Warnings (P1)</h2></div>
+  <p class="sec-intro">Five findings that need attention before scaling. Ordered by business risk.</p>
+
+  <!-- SEC-03 -->
+  <div class="bubble risk mb-24" id="founder-SEC-03">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="impact-tag compliance">Compliance</span>
+        <span class="impact-tag reputational">Reputational</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-03">Technical details</a></span>
+      </div>
+      <div class="severity-right">
+        <span class="tag risk">Warning</span>
+        <span class="tag medium">Medium Change</span>
+      </div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Your API has no CORS policy and no rate limiting — it's open to anyone, as fast as they want</h3>
+      <p><strong>What We Found:</strong> Your FastAPI application does not add CORS middleware or rate limiting. Any website can make requests to your API from a browser, and there's no limit on how many requests a single client can send. This compounds with the default no-auth mode (SEC-01) and raw error messages (SEC-09) — together, any internet-facing deployment would expose database schema details to unauthenticated clients at unlimited speed.</p>
+      <p><strong>Impact If Not Fixed:</strong> An attacker can scrape your API, exhaust your LLM provider quota (costing real money), and extract internal database details from error messages. If you handle any customer data, this is a compliance risk under GDPR and SOC2.</p>
+      <details style="margin-top:14px;">
+        <summary style="font-family:var(--mono);font-size:12px;color:var(--sky);cursor:pointer;">&#9654; AI Prompt — send this to Claude Code or Cursor</summary>
+        <div class="ai-prompt-block">
+          <button class="copy-btn" onclick="var t=this.nextElementSibling.textContent;navigator.clipboard.writeText(t).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1200)})">Copy</button>
+          <div>Load the full technical context from `architecture-review-hindsight-2026-05-27-technical.html` before implementing. Add CORSMiddleware to the FastAPI app in hindsight_api/api/http.py with explicit allowed_origins (read from environment variable). Add slowapi rate limiting middleware with configurable limits (requests per second per client). Add unit tests proving CORS blocks disallowed origins and rate limiting returns 429 after threshold. Both should be configurable via environment variables.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- ARCH-01 -->
+  <div class="bubble risk mb-24" id="founder-ARCH-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="impact-tag financial">Financial</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#ARCH-01">Technical details</a></span>
+      </div>
+      <div class="severity-right">
+        <span class="tag risk">Warning</span>
+        <span class="tag critical">Large Feature or Migration</span>
+      </div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Your core engine is a 7,000-line file that does everything — every change risks breaking something unrelated</h3>
+      <p><strong>What We Found:</strong> MemoryEngine is a single 7,000-line class with 97 methods that handles connection pooling, retain/recall/reflect orchestration, consolidation, bank CRUD, document management, entity resolution, and health checks. Changes to any one concern risk breaking every other concern. There are also zero dedicated unit tests for it (see TST-01).</p>
+      <p><strong>Impact If Not Fixed:</strong> This is the #1 reason engineering slows down as your team grows. New developer onboarding extends from days to weeks. A bug fix in document management can silently break recall. The existing Interface ABC provides a clean decomposition starting point — but without unit tests as a safety net, refactoring is dangerous.</p>
+      <div class="exec-meaning" style="margin:14px 0;">
+        <span class="label">Before coding: produce a solution design document</span>
+        <p>This is a <strong>Large Feature or Migration</strong>. Before writing code, produce a solution design document referencing <code>architecture-review-hindsight-2026-05-27-technical.html</code>. The coding agent must load the full technical report for context before implementation.</p>
+      </div>
+      <details style="margin-top:14px;">
+        <summary style="font-family:var(--mono);font-size:12px;color:var(--sky);cursor:pointer;">&#9654; AI Prompt</summary>
+        <div class="ai-prompt-block">
+          <button class="copy-btn" onclick="var t=this.nextElementSibling.textContent;navigator.clipboard.writeText(t).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1200)})">Copy</button>
+          <div>Load the full technical context from `architecture-review-hindsight-2026-05-27-technical.html` before implementing. Decompose MemoryEngine following Interface Segregation Principle. Extract: RetainEngine, RecallEngine, ReflectEngine, BankManager, DocumentManager, OperationManager, ConnectionManager. MemoryEngine becomes a facade delegating to these modules. The existing MemoryEngineInterface ABC (interface.py, 585 lines) provides the starting contract. First: add unit tests for MemoryEngine using MemoryEngineInterface as mock seam (see TST-01). Then decompose incrementally — no functional changes, each step with passing tests. Confirm all integration tests pass before and after each extraction.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- SCA-01 -->
+  <div class="bubble risk mb-24" id="founder-SCA-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag scaling">Scaling</span>
+        <span class="impact-tag financial">Financial</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SCA-01">Technical details</a></span>
+      </div>
+      <div class="severity-right">
+        <span class="tag risk">Warning</span>
+        <span class="tag medium">Medium Change</span>
+      </div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">No rate limiting on LLM API calls — a burst of requests can exhaust your provider budget</h3>
+      <p><strong>What We Found:</strong> Your API has no rate limiting at either the HTTP or LLM call level. Internal semaphores cap concurrent requests (32 for LLM, 32 for recall, 5 for retain), but any single tenant can consume ALL slots. There's no per-tenant fairness and no per-second/per-minute rate limiting.</p>
+      <p><strong>Impact If Not Fixed:</strong> A single user — or a script — can exhaust your LLM provider quota in minutes. Each GPT-4 call costs real money. Combined with no CORS and no authentication (SEC-03, SEC-01), anyone on the internet can drive up your cloud bill.</p>
+      <details style="margin-top:14px;">
+        <summary style="font-family:var(--mono);font-size:12px;color:var(--sky);cursor:pointer;">&#9654; AI Prompt</summary>
+        <div class="ai-prompt-block">
+          <button class="copy-btn" onclick="var t=this.nextElementSibling.textContent;navigator.clipboard.writeText(t).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1200)})">Copy</button>
+          <div>Load the full technical context from `architecture-review-hindsight-2026-05-27-technical.html` before implementing. Add per-tenant rate limiting middleware to FastAPI for incoming requests. Add per-tenant LLM call quotas that enforce fair scheduling across tenants. Configure limits via environment variables with sensible defaults. Write integration tests proving a single tenant cannot exceed its quota while other tenants are still served.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- DEP-02 -->
+  <div class="bubble risk mb-24" id="founder-DEP-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag financial">Financial</span>
+        <span class="impact-tag security">Security</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#DEP-02">Technical details</a></span>
+      </div>
+      <div class="severity-right">
+        <span class="tag risk">Warning</span>
+        <span class="tag medium">Medium Change</span>
+      </div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Every production install ships a 2GB AI library that most deployments never use</h3>
+      <p><strong>What We Found:</strong> PyTorch (2GB+) and sentence-transformers are listed as required dependencies. Any production deployment — even those using external embedding providers like OpenAI — must install them. This inflates Docker image sizes by ~2GB and increases the security attack surface for every user.</p>
+      <p><strong>Impact If Not Fixed:</strong> Slower deployments, higher storage costs, and an unnecessary attack surface for every customer who uses external embedding providers. Investors doing technical diligence will flag this as a sign that production readiness hasn't been prioritized.</p>
+      <details style="margin-top:14px;">
+        <summary style="font-family:var(--mono);font-size:12px;color:var(--sky);cursor:pointer;">&#9654; AI Prompt</summary>
+        <div class="ai-prompt-block">
+          <button class="copy-btn" onclick="var t=this.nextElementSibling.textContent;navigator.clipboard.writeText(t).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1200)})">Copy</button>
+          <div>Load the full technical context from `architecture-review-hindsight-2026-05-27-technical.html` before implementing. Move sentence-transformers and torch from required dependencies to an extras_require group called "local-models" in pyproject.toml. Update the Docker build to install hindsight-api[local-models] only when INCLUDE_LOCAL_MODELS=true. Verify that deployments without local models start successfully and fall back to configured external embedding providers. Add a CI test that confirms the default install (without [local-models]) succeeds and runs basic API tests.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- TST-01 -->
+  <div class="bubble risk mb-24" id="founder-TST-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="impact-tag financial">Financial</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#TST-01">Technical details</a></span>
+      </div>
+      <div class="severity-right">
+        <span class="tag risk">Warning</span>
+        <span class="tag medium">Medium Change</span>
+      </div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Your 7,000-line core engine has zero dedicated unit tests — refactoring without a safety net</h3>
+      <p><strong>What We Found:</strong> The 81 test files all require a running PostgreSQL database. None mock the database — they're integration tests. MemoryEngine's 97 methods have zero dedicated unit tests. The MemoryEngineInterface ABC exists as a perfect mock seam, but it's completely unused for testing.</p>
+      <p><strong>Impact If Not Fixed:</strong> This directly blocks the god class decomposition (ARCH-01). Without unit tests as a safety net, any refactoring of MemoryEngine is dangerous. You can't verify that behavior is preserved after extraction without spinning up a real database.</p>
+      <details style="margin-top:14px;">
+        <summary style="font-family:var(--mono);font-size:12px;color:var(--sky);cursor:pointer;">&#9654; AI Prompt</summary>
+        <div class="ai-prompt-block">
+          <button class="copy-btn" onclick="var t=this.nextElementSibling.textContent;navigator.clipboard.writeText(t).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1200)})">Copy</button>
+          <div>Load the full technical context from `architecture-review-hindsight-2026-05-27-technical.html` before implementing. Create a unit test suite for MemoryEngine in hindsight-api/tests/unit/test_memory_engine.py. Use MemoryEngineInterface as the mock injection seam. Test retain logic, recall logic, reflect orchestration, and consolidation independently using mocked database connections (AsyncMock for asyncpg). Target: unit tests covering the 10 most critical methods without requiring PostgreSQL. This unblocks the ARCH-01 decomposition.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- P2 PLAN ITEMS -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section id="plan-items">
+  <div class="sec-head"><div class="num">03</div><h2>Plan Items (P2)</h2></div>
+  <p class="sec-intro">21 findings to address over time. Ordered by domain, then impact.</p>
+
+  <!-- Security P2s -->
+  <h3 style="margin-bottom:12px;">Security</h3>
+
+  <div class="bubble medium mb-24" id="founder-SEC-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="impact-tag compliance">Compliance</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-01">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Default mode allows unauthenticated API access</h3>
+      <p><strong>What We Found:</strong> DefaultTenantExtension returns a valid context without checking any credentials. This is documented as development-only, but there's no startup warning when it's active in production.</p>
+      <p><strong>Impact If Not Fixed:</strong> A misconfigured production deployment silently serves all data without authentication. Add a startup WARNING log.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SEC-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-02">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">MCP authentication can be disabled with an environment variable</h3>
+      <p><strong>What We Found:</strong> A flag can disable MCP endpoint authentication. It's an explicit opt-in for MCP transports that handle their own auth, but there's no startup warning when enabled.</p>
+      <p><strong>Impact If Not Fixed:</strong> Someone reviewing logs wouldn't see that auth bypass is active. Add a startup WARNING.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SEC-04">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-04">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Medium Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">SQL table names built with string formatting, not proper escaping</h3>
+      <p><strong>What We Found:</strong> The function that builds qualified table names uses f-string interpolation across 5 modules (131 call sites). Currently safe because table names come from a hardcoded whitelist, but the pattern is a maintenance hazard — a future developer could pass user input.</p>
+      <p><strong>Impact If Not Fixed:</strong> If someone adds a code path passing user input to <code>fq_table()</code>, it becomes SQL injection. Migrate to proper identifier quoting.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SEC-05">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-05">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag safe">Bugfix</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Admin CLI uses string formatting for destructive SQL operations</h3>
+      <p><strong>What We Found:</strong> The admin CLI's TRUNCATE and REFRESH MATERIALIZED VIEW commands use f-string interpolation instead of proper identifier quoting. Only accessible locally, but TRUNCATE is destructive.</p>
+      <p><strong>Impact If Not Fixed:</strong> Minimal attack surface (local admin only), but proper quoting is best practice for destructive operations.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SEC-07">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-07">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Default database password in Helm chart</h3>
+      <p><strong>What We Found:</strong> The Helm chart defaults to password <code>hindsight</code> for PostgreSQL. Many deployments ship with defaults.</p>
+      <p><strong>Impact If Not Fixed:</strong> An easily guessable database password in any deployment that doesn't override it. Make the password required or auto-generated.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SEC-09">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag security">Security</span>
+        <span class="impact-tag reputational">Reputational</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SEC-09">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Medium Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">HTTP 500 error responses leak database schema details to clients</h3>
+      <p><strong>What We Found:</strong> 45 error handlers return <code>detail=str(e)</code>, which can include database table names, column names, and constraint names from <code>asyncpg.PostgresError</code>. Combined with no-auth and no-CORS defaults, this exposes internal details to anyone.</p>
+      <p><strong>Impact If Not Fixed:</strong> Attackers can map your database schema from error messages. A single global exception handler can fix all 45 instances.</p>
+    </div>
+  </div>
+
+  <!-- Architecture P2s -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Architecture</h3>
+
+  <div class="bubble medium mb-24" id="founder-ARCH-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#ARCH-02">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Medium Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Business logic uses raw SQL strings — schema changes must be updated in two places</h3>
+      <p><strong>What We Found:</strong> MemoryEngine makes 99+ direct asyncpg SQL calls, while schema changes are managed by Alembic (SQLAlchemy). When a table changes, you need to update both the migration and the embedded SQL strings. No runtime dual pattern exists, but the coordination burden is real.</p>
+      <p><strong>Impact If Not Fixed:</strong> Schema changes risk breaking runtime queries if the embedded SQL strings aren't updated. This would be resolved naturally by the Repository pattern in ARCH-01 decomposition.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-ARCH-03">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#ARCH-03">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag critical">Large Feature or Migration</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">The API module is a 4,200-line file mixing routes, models, and business logic</h3>
+      <p><strong>What We Found:</strong> <code>http.py</code> combines FastAPI route definitions, Pydantic models, auth middleware, and business logic in one file. It's well-organized internally, but hard to navigate and test in isolation.</p>
+      <p><strong>Impact If Not Fixed:</strong> Developer velocity decreases as new endpoints must be added to an already sprawling file. Splitting into APIRouter-based modules would improve navigation and enable parallel development.</p>
+      <div class="exec-meaning" style="margin:14px 0;">
+        <span class="label">Before coding: produce a solution design document</span>
+        <p>This is a <strong>Large Feature or Migration</strong>. Before writing code, produce a solution design document referencing <code>architecture-review-hindsight-2026-05-27-technical.html</code>. The coding agent must load the full technical report for context before implementation.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-ARCH-04">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#ARCH-04">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Medium Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Configuration file is 1,300 lines with 100+ manual environment variable lookups</h3>
+      <p><strong>What We Found:</strong> Each new config option requires edits in three places (ENV_ constant, DEFAULT_ constant, from_env() assignment). ConfigFieldAccessProxy is well-designed but sits atop an unwieldy monolith.</p>
+      <p><strong>Impact If Not Fixed:</strong> Adding configuration is error-prone and slow. Group related settings into typed namespaces using pydantic-settings.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-ARCH-05">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#ARCH-05">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag safe">Bugfix</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Database helper function copied to 5 different files</h3>
+      <p><strong>What We Found:</strong> <code>fq_table()</code> is implemented independently in 5 modules with different signatures. 131 call sites depend on it. MemoryEngine's version uses context variables; others take explicit parameters.</p>
+      <p><strong>Impact If Not Fixed:</strong> If someone fixes a bug in one copy, the other four still have it. Extract to a single shared module.</p>
+    </div>
+  </div>
+
+  <!-- Code Quality P2s -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Code Quality</h3>
+
+  <div class="bubble medium mb-24" id="founder-CQ-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#CQ-01">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Medium Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">21 catch-all error handlers make it hard to distinguish real bugs from expected failures</h3>
+      <p><strong>What We Found:</strong> MemoryEngine contains 21 bare <code>except Exception</code> blocks. Each logs the error, but they make it difficult to tell whether a failure is expected or a new bug. Most are deliberate firewalls for extension error handling and operation cleanup.</p>
+      <p><strong>Impact If Not Fixed:</strong> Debugging production issues becomes harder because real bugs look the same as expected failures in logs. Catch specific exception types instead.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-CQ-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#CQ-02">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Inconsistent error handling across AI providers</h3>
+      <p><strong>What We Found:</strong> The OpenAI-compatible provider catches broad <code>Exception</code> in 4 places while the Anthropic provider catches specific exceptions everywhere. This inconsistency means some AI provider errors are harder to diagnose.</p>
+      <p><strong>Impact If Not Fixed:</strong> Standardize by creating a common <code>LLMProviderError</code> base class with specific subtypes.</p>
+    </div>
+  </div>
+
+  <!-- Scaling P2s -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Scaling</h3>
+
+  <div class="bubble medium mb-24" id="founder-SCA-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag scaling">Scaling</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SCA-02">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Database connection pool could bottleneck under heavy load</h3>
+      <p><strong>What We Found:</strong> The default pool max is 100 connections. Under high concurrency, the pool could be exhausted. No circuit breaker exists for database connection failures.</p>
+      <p><strong>Impact If Not Fixed:</strong> Add connection pool metrics/logging and consider a circuit breaker pattern.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SCA-03">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag scaling">Scaling</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SCA-03">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Local AI models load synchronously at startup, blocking the server</h3>
+      <p><strong>What We Found:</strong> Embedding and reranking models load sequentially during initialization, adding 5-15 seconds to cold start. External embedding providers skip this entirely, but local deployments wait.</p>
+      <p><strong>Impact If Not Fixed:</strong> Lazy initialization for the embedding model would improve cold start times for local deployments.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-SCA-04">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag scaling">Scaling</span>
+        <span class="impact-tag financial">Financial</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#SCA-04">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag safe">Bugfix</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">No limit on how large a request body can be</h3>
+      <p><strong>What We Found:</strong> The API has no global request body size limit. Only file uploads have size constraints. A malicious client could send a 1GB JSON payload to exhaust server memory. Combined with no rate limiting (SEC-03), this amplifies the DoS surface.</p>
+      <p><strong>Impact If Not Fixed:</strong> Add request body size limiting middleware. Configure limits via environment variables.</p>
+    </div>
+  </div>
+
+  <!-- Technical Debt P2s -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Technical Debt</h3>
+
+  <div class="bubble medium mb-24" id="founder-TD-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag technical-debt">Technical Debt</span>
+        <span class="impact-tag financial">Financial</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#TD-01">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag critical">Large Feature or Migration</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">God class decomposition has been deferred indefinitely</h3>
+      <p><strong>What We Found:</strong> This is the technical debt tracking for ARCH-01. MemoryEngine combines 8+ responsibilities that should be separate modules. A phased decomposition plan exists: WorkerManager → DocumentManager → BankManager → ConnectionPool → ConsolidationEngine. MemoryEngine becomes a facade.</p>
+      <div class="exec-meaning" style="margin:14px 0;">
+        <span class="label">Before coding: produce a solution design document</span>
+        <p>This is a <strong>Large Feature or Migration</strong>. Before writing code, produce a solution design document referencing <code>architecture-review-hindsight-2026-05-27-technical.html</code>. The coding agent must load the full technical report for context before implementation.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-TD-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag technical-debt">Technical Debt</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#TD-02">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Medium Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Orchestration engine (25,000+ lines) has zero test coverage</h3>
+      <p><strong>What We Found:</strong> The cobuilder engine has 5,171 lines across core orchestration modules. Only the conditions subsystem has any tests. Pipeline parsing, session management, and signal protocol are untested.</p>
+      <p><strong>Impact If Not Fixed:</strong> Any refactoring of the orchestration engine is risky without characterization tests. Prioritize tests for core paths before any changes.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="founder-TD-03">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#TD-03">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">Auto-generated client code is checked into git, creating review noise</h3>
+      <p><strong>What We Found:</strong> Python and TypeScript client SDKs are auto-generated from OpenAPI specs but committed to git. CI checks for drift, but the checked-in code creates git diff noise and a maintenance burden.</p>
+      <p><strong>Impact If Not Fixed:</strong> Either add to .gitignore and generate at build time, or add a strict CI drift check on every PR.</p>
+    </div>
+  </div>
+
+  <!-- P2: Maintainability -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Maintainability</h3>
+
+  <div class="bubble medium mb-24" id="founder-MAI-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#MAI-01">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">No shared linting configuration enforced in CI across the monorepo</h3>
+      <p><strong>What We Found:</strong> The monorepo has 9 Python packages, each with its own linting config. A lint script exists but isn't run as a mandatory CI step. Code already passes ruff when run manually, but CI doesn't enforce it.</p>
+      <p><strong>Impact If Not Fixed:</strong> Style drift across packages. Add ruff lint to CI with a shared root configuration.</p>
+    </div>
+  </div>
+
+  <!-- P2: Dependency Health -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Dependency Health</h3>
+
+  <div class="bubble medium mb-24" id="founder-DEP-01">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="impact-tag compliance">Compliance</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#DEP-01">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">CVE patch dependencies pinned directly instead of via constraints file</h3>
+      <p><strong>What We Found:</strong> Transitive dependencies like pyasn1, urllib3, and aiohttp are pinned in pyproject.toml with CVE fix comments. This works but creates maintenance burden when upper-level packages eventually include the fixes.</p>
+      <p><strong>Impact If Not Fixed:</strong> Use a constraints file or add pip-audit/safety to CI for automated vulnerability detection.</p>
+    </div>
+  </div>
+
+  <!-- P2: Testing -->
+  <h3 style="margin-bottom:12px;margin-top:32px;">Testing</h3>
+
+  <div class="bubble medium mb-24" id="founder-TST-02">
+    <div class="author">
+      <div class="author-left">
+        <span class="impact-tag maintainability">Maintainability</span>
+        <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-technical.html#TST-02">Technical details</a></span>
+      </div>
+      <div class="severity-right"><span class="tag medium">Plan</span> <span class="tag medium">Small Change</span></div>
+    </div>
+    <div class="text">
+      <h3 style="margin-bottom:8px;">No test coverage metrics or enforcement in CI</h3>
+      <p><strong>What We Found:</strong> CI runs pytest but with no <code>--cov</code> flag, no coverage threshold, and no coverage reporting. Critical modules have no unit test coverage baseline.</p>
+      <p><strong>Impact If Not Fixed:</strong> Add pytest-cov and set minimum coverage thresholds for critical paths. This directly enables the god class decomposition by providing a safety net.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- REMEDIATION PLAN -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section id="plan">
+  <div class="sec-head"><div class="num">04</div><h2>Remediation Plan</h2></div>
+  <p class="sec-intro">Prioritized by business risk. Phase 1 before your next internet-facing deploy. Phase 2 before your next milestone. Phase 3 as time permits.</p>
+
+  <div class="card mb-24">
+    <h3 style="margin-bottom:16px;">Summary by Size</h3>
+    <table class="mb-24">
+      <thead><tr><th>Category</th><th>Count</th><th>Requires Solution Design</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tag safe">Bugfix</span></td><td>3</td><td>No</td></tr>
+        <tr><td><span class="tag medium">Small Change</span></td><td>11</td><td>No</td></tr>
+        <tr><td><span class="tag risk">Medium Change</span></td><td>9</td><td>Recommended</td></tr>
+        <tr><td><span class="tag critical">Large Feature or Migration</span></td><td>3</td><td><strong>Yes</strong> — must produce solution design first</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card mb-24" style="border-left:4px solid var(--clay);">
+    <h3 style="margin-bottom:10px;"><span class="tag risk" style="margin-right:8px;">PHASE 1</span>Secure the API (Before Next Internet-Facing Deploy)</h3>
+    <p>These compound into a real risk when the API is internet-reachable. Fix them this sprint.</p>
+    <ul style="margin-left:20px;font-size:14px;line-height:1.7;">
+      <li>SEC-03: Add CORS middleware and rate limiting to FastAPI <span class="tag medium">Medium Change</span></li>
+      <li>SEC-09: Add global exception handler to sanitize 500 responses <span class="tag medium">Medium Change</span></li>
+      <li>SCA-04: Add request body size limiting middleware <span class="tag safe">Bugfix</span></li>
+      <li>SEC-01: Add startup WARNING when DefaultTenantExtension is active <span class="tag medium">Small Change</span></li>
+      <li>SEC-07: Make Helm PostgreSQL password required or auto-generated <span class="tag medium">Small Change</span></li>
+    </ul>
+  </div>
+
+  <div class="card mb-24" style="border-left:4px solid var(--clay);">
+    <h3 style="margin-bottom:10px;"><span class="tag risk" style="margin-right:8px;">PHASE 2</span>Structural Fixes (Before Next Milestone)</h3>
+    <p>These affect how fast you can ship and how confident you can be in changes.</p>
+    <ul style="margin-left:20px;font-size:14px;line-height:1.7;">
+      <li>TST-01: Add unit tests for MemoryEngine (unblocks ARCH-01 decomposition) <span class="tag medium">Medium Change</span></li>
+      <li>ARCH-01: Decompose MemoryEngine god class <span class="tag critical">Large Feature or Migration</span> — requires solution design first</li>
+      <li>SCA-01: Add per-tenant rate limiting for LLM calls <span class="tag medium">Medium Change</span></li>
+      <li>DEP-02: Make torch/sentence-transformers optional via extras_require <span class="tag medium">Medium Change</span></li>
+      <li>ARCH-03: Split http.py into FastAPI APIRouter modules <span class="tag critical">Large Feature or Migration</span> — requires solution design first</li>
+    </ul>
+  </div>
+
+  <div class="card mb-24" style="border-left:4px solid var(--olive);">
+    <h3 style="margin-bottom:10px;"><span class="tag safe" style="margin-right:8px;">PHASE 3</span>Hardening &amp; Polish (As Time Permits)</h3>
+    <p>Important for long-term health but not blocking for the next milestone.</p>
+    <ul style="margin-left:20px;font-size:14px;line-height:1.7;">
+      <li>SEC-02: Add startup WARNING when MCP auth disabled <span class="tag medium">Small Change</span></li>
+      <li>SEC-04: Migrate fq_table() to proper identifier quoting <span class="tag medium">Medium Change</span></li>
+      <li>SEC-05: Add asyncpg quote_ident to admin CLI SQL <span class="tag safe">Bugfix</span></li>
+      <li>ARCH-04: Refactor config into typed namespaced groups <span class="tag medium">Medium Change</span></li>
+      <li>ARCH-05: Extract shared fq_table() utility <span class="tag safe">Bugfix</span></li>
+      <li>CQ-01: Replace bare excepts with specific exception types <span class="tag medium">Medium Change</span></li>
+      <li>CQ-02: Standardize LLM provider error handling <span class="tag medium">Small Change</span></li>
+      <li>SCA-02: Add connection pool metrics and circuit breaker <span class="tag medium">Small Change</span></li>
+      <li>SCA-03: Lazy-load embedding model at startup <span class="tag medium">Small Change</span></li>
+      <li>MAI-01: Add shared ruff config and enforce in CI <span class="tag medium">Small Change</span></li>
+      <li>TST-02: Add pytest-cov and coverage thresholds to CI <span class="tag medium">Small Change</span></li>
+      <li>TD-02: Add characterization tests for cobuilder engine <span class="tag medium">Medium Change</span></li>
+      <li>TD-03: Move generated client code out of git or add strict CI check <span class="tag medium">Small Change</span></li>
+      <li>DEP-01: Move CVE patches to constraints file <span class="tag medium">Small Change</span></li>
+      <li>ARCH-02: Create Repository layer (natural outcome of ARCH-01 decomposition) <span class="tag medium">Medium Change</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- PASSED -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<section id="passed">
+  <div class="sec-head"><div class="num">05</div><h2>What's Working Well</h2></div>
+  <p class="sec-intro">Seven areas passed inspection with no findings. These are strengths you can highlight.</p>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Security — Credentials properly managed via environment variables</div>
+    <div class="text"><p>All API keys, database URLs, and service account keys are loaded from environment variables with no hardcoded defaults. Sensitive fields are marked with <code>_CREDENTIAL_FIELDS</code> and never exposed via API.</p></div>
+  </div>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Architecture — Clean bounded contexts for integrations and clients</div>
+    <div class="text"><p>Integration packages (CrewAI, LiteLLM, PydanticAI, etc.) are properly separated with their own pyproject.toml, dedicated test suites, and minimal cross-dependencies. Client SDKs are auto-generated from OpenAPI specs.</p></div>
+  </div>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Architecture — Good ABC interface for MemoryEngine public API</div>
+    <div class="text"><p>MemoryEngineInterface (585 lines) properly defines the public contract with abstract methods, type hints, and comprehensive docstrings. This provides a clean decomposition starting point and enables future mock testing.</p></div>
+  </div>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Code Quality — Good use of Pydantic models for API validation</div>
+    <div class="text"><p>HTTP endpoints use Pydantic BaseModel, Field, and field_validator for request/response validation. The API contract is well-defined with type hints and validators.</p></div>
+  </div>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Maintainability — Good documentation and docstring coverage</div>
+    <div class="text"><p>Configuration has comprehensive docstrings. MemoryEngineInterface has thorough method-level documentation. SECURITY.md provides a vulnerability reporting policy.</p></div>
+  </div>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Dependency Health — CI pipeline includes comprehensive multi-version testing</div>
+    <div class="text"><p>CI tests Python 3.11 through 3.14, builds Docker images, runs integration tests, lint checks, and cross-client tests (Python, TypeScript, Rust, Go). Dependency security patches are explicitly tracked.</p></div>
+  </div>
+
+  <div class="bubble pass mb-24">
+    <div class="author"><span class="tag safe">PASS</span> Testing — Comprehensive CI testing across all client libraries</div>
+    <div class="text"><p>CI covers API (4 Python versions), all 4 client SDKs, integration tests, upgrade tests, and OpenAPI compatibility checks. This is thorough cross-platform validation.</p></div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<p class="text-small" style="margin-top:64px;border-top:1.5px solid var(--gray-300);padding-top:16px;">
+  Generated 2026-05-27 &middot; Four-tier adversarial review (P0 challenge, P1 challenge, P2 challenge, Pass spot-check) &middot; Deterministic scoring &middot;
+  <a href="architecture-review-hindsight-2026-05-27-technical.html" style="color:var(--sky);">Technical Deep-Dive &rarr;</a>
+</p>
+
+</div></body></html>

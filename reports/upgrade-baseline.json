@@ -1,0 +1,72 @@
+{
+  "captured_at": "2026-08-10T16:23:00+10:00",
+  "purpose": "Pre-upgrade baseline for the upstream/main (1832-commit) migration. Every count here MUST match after the 34->94 Alembic migration, on the clone dry-run (Phase 4) and again after cutover (Phase 5).",
+  "container": "hindsight-mcp",
+  "image": "hindsight-standalone",
+  "volume": "hindsight-data",
+  "alembic_version": "d2e3f4a5b6c7",
+  "migration_count_before": 34,
+  "migration_count_after_upstream": 94,
+  "totals": {
+    "memory_units": 15906,
+    "banks": 15,
+    "documents": 5208,
+    "entities": 31575
+  },
+  "tables_public": [
+    "alembic_version",
+    "async_operations",
+    "banks",
+    "chunks",
+    "directives",
+    "documents",
+    "entities",
+    "entity_cooccurrences",
+    "file_storage",
+    "memory_links",
+    "memory_units",
+    "mental_models",
+    "unit_entities"
+  ],
+  "memory_units_by_bank": {
+    "claude-code-agencheck": 7046,
+    "claude-harness-setup": 5477,
+    "system3-orchestrator": 1654,
+    "dspy-rlm-tests": 673,
+    "cobuilder-guardian": 513,
+    "dspy-preemploymentdirectory-poc": 128,
+    "claude-code-cobuilder-harness": 111,
+    "claude-code-harness-setup": 99,
+    "claude-code-claude-harness-setup": 89,
+    "claude-code-dspy-poc": 41,
+    "preemployment-directory": 39,
+    "hindsight-fork": 36
+  },
+  "banks_all": [
+    "prodyssey",
+    "dspy-rlm-tests",
+    "claude-code-cobuilder-harness",
+    "cobuilder-harness",
+    "cobuilder-guardian",
+    "claude-code-agencheck",
+    "system3-orchestrator",
+    "claude-code-harness-setup",
+    "claude-code-claude-harness-setup",
+    "hindsight-fork",
+    "claude-harness-setup",
+    "beads-fork",
+    "dspy-preemploymentdirectory-poc",
+    "claude-code-dspy-poc",
+    "preemployment-directory"
+  ],
+  "banks_with_zero_memories": [
+    "prodyssey",
+    "cobuilder-harness",
+    "beads-fork"
+  ],
+  "notes": [
+    "3 of 15 banks legitimately have zero memory_units at baseline - do not treat these as data loss after migration.",
+    "entity_links table does NOT exist in this schema despite being named in CLAUDE.md; the link table is unit_entities.",
+    "Host-side backup layer was broken from ~2026-04-13 to 2026-08-10 (launchd TCC 'Operation not permitted'). Newest independent host dump before repair: hindsight-20260413-001519.sql.gz."
+  ]
+}

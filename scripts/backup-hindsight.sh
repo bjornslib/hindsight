@@ -1,66 +1,91 @@
 #!/bin/bash
-# backup-hindsight.sh - Daily backup of Hindsight PostgreSQL data volume
+# backup-hindsight.sh - Host-side backup of Hindsight pg_dump files
 #
-# Setup daily cron (runs at 2am):
-#   0 2 * * * /path/to/scripts/backup-hindsight.sh >> /var/log/hindsight-backup.log 2>&1
+# Copies good backups from inside the Docker container to ~/.hindsight-backups/
+# Only copies dumps > 10KB (skips empty-DB dumps from OOM crashes)
 #
-# Or run manually:
-#   ./scripts/backup-hindsight.sh
+# Usage:
+#   ./scripts/backup-hindsight.sh              # Run backup now
+#   ./scripts/backup-hindsight.sh --list       # List available backups
+#   ./scripts/backup-hindsight.sh --install-cron  # Install daily 2am cron job
+#
+# Restore:
+#   ./scripts/restore-hindsight.sh             # Auto-restore from best backup
+#   ./scripts/restore-hindsight.sh <file.sql.gz>  # Restore specific backup
 
 set -euo pipefail
 
-SOURCE_VOL="hindsight-data"
-BACKUP_VOL="hindsight-data-backup-daily"
+BACKUP_HOST_DIR="$HOME/.hindsight-backups"
+CONTAINER_NAME="hindsight-mcp"
+CONTAINER_BACKUP_DIR="/home/hindsight/.pg0/backups"
+KEEP_COUNT=14
+MIN_SIZE_KB=10
+
+mkdir -p "$BACKUP_HOST_DIR"
+
+# Handle flags
+case "${1:-}" in
+    --list)
+        echo "Host-side backups in $BACKUP_HOST_DIR:"
+        ls -lhS "$BACKUP_HOST_DIR"/hindsight-*.sql.gz 2>/dev/null || echo "  (none)"
+        echo ""
+        echo "In-container backups:"
+        docker exec "$CONTAINER_NAME" ls -lhS "$CONTAINER_BACKUP_DIR"/ 2>/dev/null || echo "  (container not running)"
+        exit 0
+        ;;
+    --install-cron)
+        SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+        CRON_LINE="0 2 * * * $SCRIPT_PATH >> $BACKUP_HOST_DIR/backup.log 2>&1"
+        if crontab -l 2>/dev/null | grep -qF "$SCRIPT_PATH"; then
+            echo "Cron job already installed."
+        else
+            (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+            echo "Installed daily 2am cron job:"
+            echo "  $CRON_LINE"
+        fi
+        exit 0
+        ;;
+esac
+
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+echo "[$TIMESTAMP] Starting host-side backup..."
 
-echo "[$TIMESTAMP] Starting Hindsight volume backup..."
-echo "  Source: $SOURCE_VOL"
-echo "  Backup: $BACKUP_VOL"
-
-# Get source volume size in bytes
-get_volume_size() {
-    local vol="$1"
-    docker run --rm \
-        -v "${vol}:/data:ro" \
-        alpine sh -c 'du -sb /data 2>/dev/null | cut -f1' 2>/dev/null || echo "0"
-}
-
-# Check source volume exists
-if ! docker volume inspect "$SOURCE_VOL" &>/dev/null; then
-    echo "ERROR: Source volume '$SOURCE_VOL' not found!"
+# Check Docker is running
+if ! docker info &>/dev/null; then
+    echo "[$TIMESTAMP] ERROR: Docker is not running. Skipping backup."
     exit 1
 fi
 
-SOURCE_SIZE=$(get_volume_size "$SOURCE_VOL")
-echo "  Source size: ${SOURCE_SIZE} bytes"
-
-# Check if backup volume exists and compare sizes
-if docker volume inspect "$BACKUP_VOL" &>/dev/null; then
-    BACKUP_SIZE=$(get_volume_size "$BACKUP_VOL")
-    echo "  Existing backup size: ${BACKUP_SIZE} bytes"
-
-    if [ "$SOURCE_SIZE" -lt "$BACKUP_SIZE" ]; then
-        echo "WARNING: Source ($SOURCE_SIZE bytes) is SMALLER than backup ($BACKUP_SIZE bytes)."
-        echo "   This may indicate data loss in the source volume."
-        echo "   Skipping backup to protect existing backup data."
-        echo "   To force backup anyway, delete '$BACKUP_VOL' first."
-        exit 1
-    fi
-
-    echo "  Source is >= backup size. Proceeding with backup..."
-    # Remove old backup volume to recreate fresh
-    docker volume rm "$BACKUP_VOL" >/dev/null
+# Check container exists
+if ! docker ps -q -f "name=$CONTAINER_NAME" | grep -q .; then
+    echo "[$TIMESTAMP] ERROR: Container '$CONTAINER_NAME' is not running. Skipping backup."
+    exit 1
 fi
 
-# Create fresh backup volume
-docker volume create "$BACKUP_VOL" >/dev/null
+# Copy backups from container to host
+COPIED=0
+for file in $(docker exec "$CONTAINER_NAME" find "$CONTAINER_BACKUP_DIR" -name "hindsight-*.sql.gz" -size "+${MIN_SIZE_KB}k" 2>/dev/null); do
+    BASENAME=$(basename "$file")
+    if [ ! -f "$BACKUP_HOST_DIR/$BASENAME" ]; then
+        echo "  Copying $BASENAME..."
+        docker cp "$CONTAINER_NAME:$file" "$BACKUP_HOST_DIR/$BASENAME"
+        COPIED=$((COPIED + 1))
+    fi
+done
 
-# Copy data
-echo "  Copying data..."
-docker run --rm \
-    -v "${SOURCE_VOL}:/source:ro" \
-    -v "${BACKUP_VOL}:/dest" \
-    alpine sh -c 'cp -av /source/. /dest/ && echo "Copy complete."'
+if [ "$COPIED" -eq 0 ]; then
+    echo "  No new backups to copy."
+else
+    echo "  Copied $COPIED new backup(s)."
+fi
 
-FINAL_SIZE=$(get_volume_size "$BACKUP_VOL")
-echo "[$TIMESTAMP] Backup complete. Backup size: ${FINAL_SIZE} bytes"
+# Prune old host-side backups (keep most recent N)
+PRUNED=0
+for old in $(ls -t "$BACKUP_HOST_DIR"/hindsight-*.sql.gz 2>/dev/null | tail -n +$((KEEP_COUNT + 1))); do
+    echo "  Pruning old backup: $(basename "$old")"
+    rm -f "$old"
+    PRUNED=$((PRUNED + 1))
+done
+
+TOTAL=$(ls "$BACKUP_HOST_DIR"/hindsight-*.sql.gz 2>/dev/null | wc -l | tr -d ' ')
+echo "[$TIMESTAMP] Done. $TOTAL backup(s) on host ($COPIED new, $PRUNED pruned)."

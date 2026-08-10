@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Technical Deep-Dive — Hindsight Architecture Review 2026-05-27</title>
+<style>
+:root {
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --rust:     #B04A3F;
+  --sky:      #6A8CAF;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+  --white:    #FFFFFF;
+  --serif: ui-serif, Georgia, 'Times New Roman', serif;
+  --sans:  system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono:  ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--sans); background: var(--ivory); color: var(--gray-700); line-height: 1.55; padding: 56px 32px 120px; -webkit-font-smoothing: antialiased; }
+.page { max-width: 1120px; margin: 0 auto; }
+h1 { font-family: var(--serif); font-weight: 500; font-size: 38px; line-height: 1.15; color: var(--slate); letter-spacing: -0.01em; }
+h2 { font-family: var(--serif); font-weight: 500; font-size: 26px; color: var(--slate); letter-spacing: -0.01em; }
+h3 { font-family: var(--serif); font-weight: 500; font-size: 19px; color: var(--slate); }
+.eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gray-500); }
+.lead { font-size: 17px; line-height: 1.6; color: var(--gray-700); max-width: 640px; }
+p { font-size: 15px; margin-bottom: 12px; max-width: 720px; }
+header.page-head { margin-bottom: 48px; max-width: 820px; }
+.prompt-box { background: var(--gray-150); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 16px 20px; font-size: 14.5px; color: var(--gray-700); }
+.prompt-box .label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); display: block; margin-bottom: 6px; }
+.card { background: var(--white); border: 1.5px solid var(--gray-300); border-radius: 12px; padding: 20px; }
+.card-head { padding: 16px 20px; border-bottom: 1.5px solid var(--gray-300); display: flex; align-items: center; gap: 12px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; border: 1.5px solid var(--gray-300); font-family: var(--mono); font-size: 12.5px; color: var(--slate); background: var(--white); }
+.tag { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 3px 8px; border-radius: 6px; border: 1.5px solid var(--gray-300); background: var(--gray-150); }
+.tag.safe   { background: rgba(120,140,93,0.12); border-color: rgba(120,140,93,0.4); color: var(--olive); }
+.tag.medium { background: var(--oat); color: #7A6A4F; }
+.tag.risk   { background: rgba(217,119,87,0.12); border-color: rgba(217,119,87,0.45); color: var(--clay); }
+.tag.critical { background: rgba(176,74,63,0.12); border-color: rgba(176,74,63,0.4); color: var(--rust); }
+.tag.p3 { background: rgba(106,140,175,0.12); border-color: rgba(106,140,175,0.4); color: var(--sky); }
+.risk-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.risk-dot.safe   { background: var(--olive); }
+.risk-dot.medium { background: #B89B6E; }
+.risk-dot.risk   { background: var(--clay); }
+.risk-dot.critical { background: var(--rust); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+thead th { font-family: var(--mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); text-align: left; padding: 10px 14px; border-bottom: 1.5px solid var(--gray-300); }
+tbody td { padding: 12px 14px; border-bottom: 1px solid var(--gray-150); color: var(--gray-700); }
+tbody tr:hover { background: var(--gray-150); }
+code { font-family: var(--mono); font-size: 13px; }
+section { margin-bottom: 64px; }
+.sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
+.sec-head .num { font-family: var(--mono); font-size: 12px; background: var(--oat); color: var(--slate); padding: 3px 9px; border-radius: 8px; }
+.sec-intro { font-size: 14.5px; color: var(--gray-500); max-width: 720px; margin-bottom: 28px; }
+.bubble { position: relative; background: var(--white); border: 1.5px solid var(--gray-300); border-left-width: 4px; border-radius: 8px; padding: 12px 14px 12px 16px; margin-bottom: 24px; }
+.bubble.critical { border-left-color: var(--rust); }
+.bubble.risk     { border-left-color: var(--clay); }
+.bubble.medium   { border-left-color: var(--clay); opacity: 0.92; }
+.bubble.nit      { border-left-color: var(--sky); }
+.bubble.pass     { border-left-color: var(--olive); }
+.bubble .text { font-size: 13.5px; line-height: 1.55; color: var(--gray-700); }
+.bubble .author { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--slate); margin-bottom: 4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.audit-domain-header { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); margin-top: 32px; margin-bottom: 8px; }
+.evidence-block { background: var(--slate); color: #E8E6DC; font-family: var(--mono); font-size: 12.5px; line-height: 1.7; padding: 14px 16px; border-radius: 8px; overflow-x: auto; margin: 8px 0; }
+.evidence-block .file-path { color: var(--sky); margin-bottom: 4px; font-size: 12px; }
+.evidence-block .line-num { color: var(--gray-500); margin-right: 8px; user-select: none; }
+.evidence-block .highlight { background: rgba(217,119,87,0.25); padding: 0 2px; border-radius: 2px; }
+.related-finding { font-size: 12.5px; color: var(--gray-500); margin-top: 6px; }
+.related-finding a { color: var(--sky); text-decoration: none; }
+.related-finding a:hover { text-decoration: underline; }
+.nav-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 32px; }
+.nav-strip a { text-decoration: none; }
+.nav-strip .chip { transition: border-color 0.15s; }
+.nav-strip .chip:hover { border-color: var(--gray-500); }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
+.grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 24px; }
+.text-mono { font-family: var(--mono); }
+.text-small { font-size: 12px; color: var(--gray-500); }
+.color-safe  { color: var(--olive); }
+.color-risk  { color: var(--clay); }
+.color-crit  { color: var(--rust); }
+.color-info  { color: var(--sky); }
+.mb-8  { margin-bottom: 8px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-24 { margin-bottom: 24px; }
+.mb-48 { margin-bottom: 48px; }
+.stat-card { text-align: center; padding: 24px 16px; }
+.stat-card .stat-value { font-family: var(--serif); font-size: 36px; font-weight: 500; color: var(--slate); }
+.stat-card .stat-label { font-family: var(--mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--gray-500); margin-top: 6px; }
+.score-bar-track { height: 8px; background: var(--gray-150); border-radius: 4px; overflow: hidden; }
+.score-bar-fill { height: 100%; border-radius: 4px; }
+.score-bar-fill.safe     { background: var(--olive); }
+.score-bar-fill.medium   { background: #B89B6E; }
+.score-bar-fill.risk     { background: var(--clay); }
+.score-bar-fill.critical { background: var(--rust); }
+.bar-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--gray-500); margin-bottom: 4px; }
+.review-badge { font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 4px; background: var(--gray-150); border: 1px solid var(--gray-300); color: var(--gray-500); }
+.review-badge.confirmed { background: rgba(120,140,93,0.1); border-color: rgba(120,140,93,0.3); color: var(--olive); }
+.review-badge.downgraded { background: rgba(106,140,175,0.1); border-color: rgba(106,140,175,0.3); color: var(--sky); }
+.review-badge.upgraded { background: rgba(217,119,87,0.1); border-color: rgba(217,119,87,0.3); color: var(--clay); }
+.review-badge.new { background: rgba(176,74,63,0.1); border-color: rgba(176,74,63,0.3); color: var(--rust); }
+@media (max-width: 900px) {
+  .grid-2 { grid-template-columns: 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr; }
+  body { padding: 32px 20px 80px; }
+  h1 { font-size: 28px; }
+}
+@media (max-width: 600px) {
+  .grid-3 { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+<!-- HEADER -->
+<header class="page-head">
+  <div class="eyebrow">ARCHITECTURE REVIEW — TECHNICAL DEEP-DIVE</div>
+  <h1>Hindsight — Architecture &amp; Security Audit</h1>
+  <p class="lead">Full-spectrum engineering assessment: security, architecture, code quality, scaling, maintainability, dependency health, and test coverage across the Hindsight codebase.</p>
+  <div class="prompt-box">
+    <span class="label">Audit scope</span>
+    Full-spectrum audit of the Hindsight codebase: security, architecture, code quality, scaling, maintainability, dependency health, and test coverage. Production code covering hindsight-api, hindsight-integrations, hindsight-clients, and supporting modules. Four-tier adversarial review (P0 → P1 → P2 → Pass spot-check) with deterministic scoring.
+  </div>
+</header>
+
+<!-- NAV -->
+<nav class="nav-strip">
+  <a href="#overview"><div class="chip"><span class="risk-dot safe"></span> Overview</div></a>
+  <a href="#security"><div class="chip"><span class="risk-dot critical"></span> Security (9)</div></a>
+  <a href="#architecture"><div class="chip"><span class="risk-dot risk"></span> Architecture (7)</div></a>
+  <a href="#quality"><div class="chip"><span class="risk-dot medium"></span> Code Quality (3)</div></a>
+  <a href="#scaling"><div class="chip"><span class="risk-dot risk"></span> Scaling (4)</div></a>
+  <a href="#maintainability"><div class="chip"><span class="risk-dot medium"></span> Maintainability (3)</div></a>
+  <a href="#debt"><div class="chip"><span class="risk-dot medium"></span> Technical Debt (3)</div></a>
+  <a href="#dependencies"><div class="chip"><span class="risk-dot risk"></span> Dependencies (3)</div></a>
+  <a href="#testing"><div class="chip"><span class="risk-dot risk"></span> Testing (4)</div></a>
+  <a href="architecture-review-hindsight-2026-05-27-founder.html"><div class="chip" style="background:rgba(106,140,175,0.12);border-color:rgba(106,140,175,0.4);"><span class="risk-dot" style="background:var(--sky);"></span> Founder Report &rarr;</div></a>
+</nav>
+
+<!-- TECHNICAL REPORT SUMMARY -->
+<section id="overview">
+  <div class="sec-head"><div class="num">01</div><h2>Technical Report Summary</h2></div>
+  <p class="sec-intro">Audit date: 2026-05-27. Four-tier adversarial review completed: P0 challenge, P1 challenge, P2 challenge, and Pass spot-check. Final distribution: <strong>0 P0</strong>, <strong>5 P1</strong>, <strong>21 P2</strong>, <strong>3 P3</strong>, <strong>7 PASS</strong>. Overall health: <strong>84.9/100 (Grade B)</strong>.</p>
+
+  <div class="grid-4 mb-24">
+    <div class="card stat-card"><div class="stat-value color-info">0</div><div class="stat-label">Critical (P0)</div></div>
+    <div class="card stat-card"><div class="stat-value color-risk">5</div><div class="stat-label">Warning (P1)</div></div>
+    <div class="card stat-card"><div class="stat-value" style="color:#B89B6E;">21</div><div class="stat-label">Plan (P2)</div></div>
+    <div class="card stat-card"><div class="stat-value color-safe">7</div><div class="stat-label">Passed</div></div>
+  </div>
+
+  <div class="card mb-24">
+    <table>
+      <thead><tr><th>Category</th><th>Score</th><th>Grade</th><th>P0</th><th>P1</th><th>P2</th><th>P3</th><th>Findings</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Security</strong></td><td title="(0 P0, 1 P1, 6 P2 → 75/100)">75</td><td style="color:var(--clay);">C+</td><td>0</td><td>1</td><td>6</td><td>1</td><td>9</td></tr>
+        <tr><td><strong>Architecture</strong></td><td title="(0 P0, 1 P1, 4 P2 → 81/100)">81</td><td style="color:var(--clay);">B-</td><td>0</td><td>1</td><td>4</td><td>0</td><td>7</td></tr>
+        <tr><td><strong>Code Quality</strong></td><td title="(0 P0, 0 P1, 2 P2 → 94/100)">94</td><td style="color:var(--olive);">A</td><td>0</td><td>0</td><td>2</td><td>0</td><td>3</td></tr>
+        <tr><td><strong>Scaling</strong></td><td title="(0 P0, 1 P1, 3 P2 → 84/100)">84</td><td style="color:var(--olive);">B</td><td>0</td><td>1</td><td>3</td><td>0</td><td>4</td></tr>
+        <tr><td><strong>Maintainability</strong></td><td title="(0 P0, 0 P1, 1 P2 → 97/100)">97</td><td style="color:var(--olive);">A+</td><td>0</td><td>0</td><td>1</td><td>1</td><td>3</td></tr>
+        <tr><td><strong>Technical Debt</strong></td><td title="(0 P0, 0 P1, 3 P2 → 91/100)">91</td><td style="color:var(--olive);">A-</td><td>0</td><td>0</td><td>3</td><td>0</td><td>3</td></tr>
+        <tr><td><strong>Dependency Health</strong></td><td title="(0 P0, 1 P1, 1 P2 → 90/100)">90</td><td style="color:var(--olive);">A-</td><td>0</td><td>1</td><td>1</td><td>0</td><td>3</td></tr>
+        <tr><td><strong>Testing</strong></td><td title="(0 P0, 1 P1, 1 P2 → 90/100)">90</td><td style="color:var(--olive);">A-</td><td>0</td><td>1</td><td>1</td><td>1</td><td>4</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECURITY -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Security — 75/100</div>
+<section id="security">
+  <div class="sec-head"><div class="num">02</div><h2>Security Findings</h2></div>
+  <p class="sec-intro">9 findings: 1 P1 (no CORS or rate limiting), 6 P2, 1 P3, 1 PASS. The default deployment is open to cross-origin requests and has no per-second rate limiting. Individual findings are moderate in isolation but compound when combined (SEC-01 + SEC-03 + SEC-09 = unauthenticated access with schema leakage).</p>
+
+  <div class="bubble risk mb-24" id="SEC-03">
+    <div class="author"><span class="tag risk">P1</span> SEC-03 — No CORS configuration or rate limiting on API endpoints <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-03">Founder view</a></span> <span class="review-badge confirmed">confirmed P1</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/api/http.py:1797</code></p>
+      <p><strong>Technical description:</strong> The FastAPI <code>create_app</code> function does not add CORSMiddleware or any rate limiting middleware. <code>grep</code> for CORS, CORSMiddleware, rate_limit, and slowapi across the entire <code>hindsight_api/</code> directory returns zero results. The only middleware added is <code>http_metrics_middleware</code> (Prometheus telemetry).</p>
+      <p><strong>Compound risk:</strong> Combined with SEC-01 (default no-auth) and SEC-09 (raw exception messages), any internet-reachable deployment is fully exposed — any origin can call the API, with unlimited request frequency, and receive database schema details in error responses.</p>
+      <p><strong>Internal backpressure exists but is insufficient:</strong> Internal semaphores (<code>_global_llm_semaphore</code> = 32, <code>_search_semaphore</code> = 32, <code>_put_semaphore</code> = 5) provide process-level concurrency limits but are NOT per-tenant and NOT per-second rate limits. A single tenant can consume all semaphore slots.</p>
+      <div class="evidence-block">
+        <div class="file-path">hindsight-api/hindsight_api/api/http.py:1797</div>
+        <div><span class="line-num">1797</span> app = FastAPI(title=..., lifespan=lifespan)</div>
+        <div><span class="line-num">1798</span> app.add_middleware(http_metrics_middleware) <span class="highlight"># Only middleware — no CORS, no rate limiting</span></div>
+      </div>
+      <p><strong>Recommended fix:</strong> Add <code>CORSMiddleware</code> with explicit <code>allowed_origins</code>. Add rate limiting via <code>slowapi</code>. Make both configurable via environment variables.</p>
+    </div>
+  </div>
+
+  <div class="bubble risk mb-24" id="SEC-01">
+    <div class="author"><span class="tag medium">P2</span> SEC-01 — DefaultTenantExtension allows unauthenticated access to all data <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-01">Founder view</a></span> <span class="review-badge confirmed">downgraded from P1</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/extensions/builtin/tenant.py:26</code></p>
+      <p><strong>Technical description:</strong> <code>DefaultTenantExtension.authenticate()</code> returns <code>TenantContext(schema_name=self._schema)</code> without any authentication check. When no tenant extension is configured, all requests are served on the default schema with no API key or token validation.</p>
+      <p><strong>Review note:</strong> Downgraded from P1 because <code>DefaultTenantExtension</code> is documented as no-auth single-tenant for development. The real risk is deployment misconfiguration. A startup WARNING log when <code>DefaultTenantExtension</code> is active would be the appropriate remediation.</p>
+      <div class="evidence-block">
+        <div class="file-path">hindsight-api/hindsight_api/extensions/builtin/tenant.py:26</div>
+        <div><span class="line-num">26</span> async def authenticate(self, request: Request) -> TenantContext:</div>
+        <div><span class="line-num">27</span>     <span class="highlight">return TenantContext(schema_name=self._schema)</span></div>
+      </div>
+      <p><strong>Recommended fix:</strong> Add a startup WARNING log when DefaultTenantExtension is active. Consider requiring explicit opt-in for no-auth mode in production.</p>
+    </div>
+  </div>
+
+  <div class="bubble risk mb-24" id="SEC-02">
+    <div class="author"><span class="tag medium">P2</span> SEC-02 — MCP auth can be disabled via environment variable <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-02">Founder view</a></span> <span class="review-badge confirmed">downgraded from P1</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/extensions/builtin/tenant.py:67</code></p>
+      <p><strong>Technical description:</strong> <code>ApiKeyTenantExtension</code> has <code>mcp_auth_disabled</code> flag. When set to <code>true/1/yes</code>, <code>authenticate_mcp</code> returns <code>TenantContext</code> without checking the API key. Documented as backward compatibility for MCP transports that provide their own auth layer.</p>
+      <p><strong>Review note:</strong> Downgraded from P1 — explicit opt-in flag (default empty/false). Only needed for stdin-based MCP servers. A startup WARNING when enabled would be appropriate.</p>
+      <p><strong>Recommended fix:</strong> Add a startup WARNING when <code>mcp_auth_disabled</code> is set. Consider deprecating this flag.</p>
+    </div>
+  </div>
+
+  <div class="bubble risk mb-24" id="SEC-04">
+    <div class="author"><span class="tag medium">P2</span> SEC-04 — SQL table names constructed via f-string interpolation <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-04">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py:59</code> (and 4 other locations)</p>
+      <p><strong>Technical description:</strong> <code>fq_table(table_name)</code> returns <code>f'{schema}.{table_name}'</code> where <code>table_name</code> comes from hardcoded <code>_PROTECTED_TABLES</code> whitelist. The pattern is used in 5 modules (131 call sites total). Current implementation is safe because table names come from whitelist, but f-string interpolation for SQL identifiers is a category error that creates a maintenance hazard.</p>
+      <p><strong>Recommended fix:</strong> Migrate <code>fq_table()</code> to use <code>asyncpg's quote_ident</code> or SQLAlchemy's <code>quote</code>. Document that <code>fq_table()</code> must only be called with hardcoded table names.</p>
+    </div>
+  </div>
+
+  <div class="bubble risk mb-24" id="SEC-05">
+    <div class="author"><span class="tag medium">P2</span> SEC-05 — Admin CLI TRUNCATE uses f-string interpolation for schema/table names <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-05">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/admin/cli.py:115</code></p>
+      <p><strong>Technical description:</strong> Admin CLI uses f-string interpolation for <code>TRUNCATE TABLE {qualified_table} CASCADE</code> and <code>REFRESH MATERIALIZED VIEW</code>. Attack surface is minimal (local admin tool only, schema from config/env, table names from hardcoded lists), but TRUNCATE is destructive and proper identifier quoting is best practice.</p>
+      <p><strong>Recommended fix:</strong> Use <code>asyncpg's quote_ident</code> or validate schema/table names against an allowlist before interpolation.</p>
+    </div>
+  </div>
+
+  <div class="bubble risk mb-24" id="SEC-07">
+    <div class="author"><span class="tag medium">P2</span> SEC-07 — Default PostgreSQL password in Helm values <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-07">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>helm/hindsight/values.yaml:213</code></p>
+      <p><strong>Technical description:</strong> <code>password: 'hindsight'</code> is the default PostgreSQL password in the Helm chart. Many Kubernetes deployments ship with default values. PostgreSQL is network-accessible within the cluster.</p>
+      <p><strong>Recommended fix:</strong> Remove the default password. Make it required, or generate a random one on install. Add a NOTES.txt warning.</p>
+    </div>
+  </div>
+
+  <div class="bubble risk mb-24" id="SEC-09">
+    <div class="author"><span class="tag medium">P2</span> SEC-09 — HTTP 500 responses expose raw exception messages to API clients <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SEC-09">Founder view</a></span> <span class="review-badge new">found by spot-check</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/api/http.py:1987</code> (45 instances)</p>
+      <p><strong>Technical description:</strong> <code>http.py</code> contains 45 instances of <code>HTTPException(status_code=500, detail=str(e))</code> that expose raw Python exception messages to API clients. Database errors (<code>asyncpg.PostgresError</code>) can include table names, column names, constraint names, and schema details. Compounds with SEC-01 (default no-auth) and SEC-03 (no CORS/rate-limiting).</p>
+      <div class="evidence-block">
+        <div class="file-path">hindsight-api/hindsight_api/api/http.py:1987</div>
+        <div><span class="line-num">1987</span> except Exception as e:</div>
+        <div><span class="line-num">1988</span>     import traceback</div>
+        <div><span class="line-num">1989</span>     error_detail = str(e) + traceback.format_exc()</div>
+        <div><span class="line-num">1990</span>     logger.error(...)</div>
+        <div><span class="line-num">1991</span>     <span class="highlight">raise HTTPException(status_code=500, detail=str(e))</span></div>
+      </div>
+      <p><strong>Recommended fix:</strong> Add a global exception handler to FastAPI that sanitizes 500 error responses. Replace <code>detail=str(e)</code> with a generic message in production. Log full exceptions server-side (already done).</p>
+    </div>
+  </div>
+
+  <div class="bubble nit mb-24" id="SEC-06">
+    <div class="author"><span class="tag p3">P3</span> SEC-06 — dotenv override=True may leak env vars in multi-tenant deployments <span class="review-badge downgraded">downgraded from P2</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/config.py:17</code></p>
+      <p><strong>Technical description:</strong> <code>load_dotenv(find_dotenv(usecwd=True), override=True)</code> allows <code>.env</code> values to take precedence over environment variables. Hindsight is single-tenant per process — the multi-tenant framing is incorrect. The pattern is typically desired for local development. In containerized deployments, <code>.env</code> files are not typically mounted.</p>
+      <p><strong>Review note:</strong> Downgraded to P3 — the risk requires local filesystem access and overrides the typical desired direction.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="SEC-08">
+    <div class="author"><span class="tag safe">PASS</span> SEC-08 — Security credentials properly managed via environment variables</div>
+    <div class="text">
+      <p>All API keys, database URLs, and service account keys are loaded from environment variables with no hardcoded defaults. <code>_CREDENTIAL_FIELDS</code> clearly marks fields that must never be exposed via API. <code>.env</code> file is in <code>.gitignore</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- ARCHITECTURE -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Architecture — 81/100</div>
+<section id="architecture">
+  <div class="sec-head"><div class="num">03</div><h2>Architecture Findings</h2></div>
+  <p class="sec-intro">7 findings: 1 P1 (7000-line god class), 4 P2, 2 PASS. The MemoryEngine god class is the dominant structural risk, affecting development velocity, test coverage, and regression risk.</p>
+
+  <div class="bubble critical mb-24" id="ARCH-01">
+    <div class="author"><span class="tag critical">P1</span> ARCH-01 — MemoryEngine is a 7000-line god class with 97 methods and 112 imports <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-ARCH-01">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py:223</code></p>
+      <p><strong>Technical description:</strong> <code>MemoryEngine</code> is 6,979 lines with 98 method definitions and 112 import lines. It handles connection pool management, async operation tracking, retain/recall/reflect orchestration, consolidation, bank CRUD, document management, entity resolution, and health checks in a single class. The 21 bare <code>except Exception</code> blocks (see CQ-01) make it difficult to reason about error propagation.</p>
+      <div class="evidence-block">
+        <div class="file-path">hindsight-api/hindsight_api/engine/memory_engine.py</div>
+        <div><span class="line-num">223</span> class MemoryEngine(MemoryEngineInterface):</div>
+        <div><span class="line-num">...</span> <span class="highlight"># 6979 lines, 98 methods, 112 imports, 21 bare except blocks</span></div>
+      </div>
+      <p><strong>Recommended fix:</strong> Decompose following Interface Segregation Principle. Extract into focused modules: <code>RetainEngine</code>, <code>RecallEngine</code>, <code>ReflectEngine</code>, <code>BankManager</code>, <code>DocumentManager</code>, <code>OperationManager</code>, <code>ConnectionManager</code>. The existing <code>MemoryEngineInterface</code> ABC provides a good starting contract. See TD-01 for the decomposition plan.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="ARCH-02">
+    <div class="author"><span class="tag medium">P2</span> ARCH-02 — Direct asyncpg SQL in business logic bypasses ORM abstraction <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-ARCH-02">Founder view</a></span> <span class="review-badge downgraded">downgraded from P1</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py</code></p>
+      <p><strong>Technical description:</strong> MemoryEngine uses exclusively <code>asyncpg</code> for runtime data access. SQLAlchemy models in <code>models.py</code> (316 lines) are used only for Alembic migrations, not runtime queries — so there is no true "dual pattern." However, schema changes must be coordinated between Alembic migrations and 99+ asyncpg SQL strings, creating a maintenance risk. The <code>fq_table()</code> pattern with <code>_PROTECTED_TABLES</code> whitelist provides defense in depth.</p>
+      <p><strong>Review note:</strong> Downgraded from P1 because there is not a dual runtime data access pattern — SQLAlchemy models are schema-only. The concern about schema coordination is legitimate but subsumed by ARCH-01's decomposition.</p>
+      <p><strong>Recommended fix:</strong> Create a Repository layer that encapsulates all asyncpg SQL, with MemoryEngine calling repository methods instead of raw SQL strings. This would naturally emerge from ARCH-01 decomposition.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="ARCH-03">
+    <div class="author"><span class="tag medium">P2</span> ARCH-03 — http.py is a 4200-line monolithic API module combining routes, models, and business logic <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-ARCH-03">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/api/http.py</code> (4,230 lines, 138 function definitions)</p>
+      <p><strong>Technical description:</strong> <code>http.py</code> combines FastAPI route definitions, Pydantic request/response models, authentication middleware, and business logic in a single file. The file is well-structured internally with clear sections, but navigation and isolated testing are difficult.</p>
+      <p><strong>Recommended fix:</strong> Split into module-based routers following FastAPI's <code>APIRouter</code> pattern: <code>routers/retain.py</code>, <code>routers/recall.py</code>, <code>routers/reflect.py</code>, <code>routers/banks.py</code>, <code>routers/documents.py</code>, <code>routers/admin.py</code>. Keep models in a separate <code>models/</code> module.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="ARCH-04">
+    <div class="author"><span class="tag medium">P2</span> ARCH-04 — config.py is 1300 lines with 100+ fields and manual env parsing <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-ARCH-04">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/config.py</code> (1,308 lines, 178 <code>os.getenv/os.environ</code> calls)</p>
+      <p><strong>Technical description:</strong> The <code>HindsightConfig</code> dataclass contains 100+ fields with manual <code>os.getenv()</code> calls in <code>from_env()</code>. Each new configuration option requires changes in 3 places: <code>ENV_</code> constant, <code>DEFAULT_</code> constant, and <code>from_env()</code> assignment. <code>ConfigFieldAccessProxy</code> is a well-designed access control layer that prevents misconfiguration.</p>
+      <p><strong>Recommended fix:</strong> Refactor into configuration groups (e.g., <code>LLMConfig</code>, <code>EmbeddingsConfig</code>, <code>RetainConfig</code>) using <code>pydantic-settings</code> or similar typed configuration library.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="ARCH-05">
+    <div class="author"><span class="tag medium">P2</span> ARCH-05 — fq_table() utility duplicated across 5 modules without shared module <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-ARCH-05">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>Files:</strong> <code>memory_engine.py:59</code>, <code>poller.py:28</code>, <code>task_backend.py:21</code>, <code>storage/postgresql.py:15</code>, <code>admin/cli.py:21</code> (131 total call sites)</p>
+      <p><strong>Technical description:</strong> <code>fq_table()</code> is implemented independently in 5 locations with different signatures: <code>memory_engine.py</code> uses context variables for schema, others take <code>schema</code> as a parameter. The duplication creates inconsistency risk.</p>
+      <p><strong>Recommended fix:</strong> Extract <code>fq_table()</code> into a shared <code>db_utils.py</code> module. Standardize on the context-variable version as canonical.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="ARCH-06">
+    <div class="author"><span class="tag safe">PASS</span> ARCH-06 — Well-structured bounded contexts for integrations and clients</div>
+    <div class="text">
+      <p>Integration packages (crewai, litellm, pydantic-ai, ai-sdk, chat, openclaw) are cleanly separated with their own <code>pyproject.toml</code>, dedicated test suites, and minimal cross-dependencies. Client SDKs (Python, TypeScript, Rust, Go) are auto-generated from OpenAPI specs.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="ARCH-07">
+    <div class="author"><span class="tag safe">PASS</span> ARCH-07 — Good use of ABC interface for MemoryEngine public API</div>
+    <div class="text">
+      <p><code>MemoryEngineInterface</code> (585 lines) properly defines the public contract with abstract methods, type hints, and comprehensive docstrings. This separates interface from implementation and enables mock testing — though the mock seam is currently unused (see TST-01).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- CODE QUALITY -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Code Quality — 94/100</div>
+<section id="quality">
+  <div class="sec-head"><div class="num">04</div><h2>Code Quality Findings</h2></div>
+  <p class="sec-intro">3 findings: 2 P2, 1 PASS. Code quality is strong overall. The two P2 findings are concentrated in the MemoryEngine god class and will be addressed by its decomposition (ARCH-01).</p>
+
+  <div class="bubble medium mb-24" id="CQ-01">
+    <div class="author"><span class="tag medium">P2</span> CQ-01 — MemoryEngine has 21 bare except Exception blocks that swallow errors <span class="review-badge downgraded">downgraded from P1</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py</code> (lines 657, 750, 919, 956, 981, 1007, 1039, 1066, 1172, 1450, 1791, 1800, 2071, 2112, 2140, 2167, 2955, 3270, 4792, 5166, and 1 more)</p>
+      <p><strong>Technical description:</strong> 21 instances of <code>except Exception as e:</code> in <code>memory_engine.py</code>. While each logs the error, the pattern makes it difficult to distinguish expected failures from unexpected bugs. Some catch blocks retry the operation silently; others log and return partial results.</p>
+      <p><strong>Review note:</strong> Downgraded from P1 — most are deliberate firewalls (extension error handlers, operation cleanup, health checks). They log the error rather than silently swallowing. Address during ARCH-01 decomposition by catching more specific exception types.</p>
+      <p><strong>Recommended fix:</strong> Catch specific exception types (<code>asyncpg.PostgresError</code>, <code>ConnectionError</code>, custom <code>LLMError</code>). Create a custom exception hierarchy.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="CQ-02">
+    <div class="author"><span class="tag medium">P2</span> CQ-02 — Broad exception handling in LLM providers</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/providers/openai_compatible_llm.py</code></p>
+      <p><strong>Technical description:</strong> <code>openai_compatible_llm.py</code> catches generic <code>Exception</code> in 4 places (lines 138, 490, 631, 782) while <code>anthropic_llm.py</code> catches specific exceptions in all paths. The provider also catches specific exceptions (<code>JSONDecodeError</code>, <code>LengthFinishReasonError</code>, <code>APIConnectionError</code>, <code>APIStatusError</code>, <code>httpx.HTTPStatusError</code>), but falls back to broad <code>Exception</code>.</p>
+      <p><strong>Recommended fix:</strong> Standardize exception handling across all LLM providers. Create a common <code>LLMProviderError</code> base class with specific subtypes.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="CQ-04">
+    <div class="author"><span class="tag safe">PASS</span> CQ-04 — Good use of Pydantic models for API validation</div>
+    <div class="text">
+      <p>HTTP endpoints use Pydantic <code>BaseModel</code>, <code>Field</code>, and <code>field_validator</code> for request/response validation. The API contract is well-defined with type hints and validators.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SCALING -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Scaling — 84/100</div>
+<section id="scaling">
+  <div class="sec-head"><div class="num">05</div><h2>Scaling Findings</h2></div>
+  <p class="sec-intro">4 findings: 1 P1 (no rate limiting), 3 P2. The internal semaphores provide process-level backpressure but lack per-tenant fairness and per-second rate limiting.</p>
+
+  <div class="bubble risk mb-24" id="SCA-01">
+    <div class="author"><span class="tag risk">P1</span> SCA-01 — No rate limiting on LLM API calls — burst traffic can exhaust provider quotas <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-SCA-01">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py</code></p>
+      <p><strong>Technical description:</strong> No rate limiting middleware exists at the FastAPI layer. Internal semaphores (<code>_global_llm_semaphore</code>=32, <code>_search_semaphore</code>=32, <code>_put_semaphore</code>=5) provide process-level concurrency limits, but any single tenant can consume ALL semaphore slots. No per-second/per-minute/per-hour rate limiting exists. No tenant-level fairness in semaphore scheduling.</p>
+      <p><strong>Compound risk:</strong> Combined with SEC-03 (no CORS + no rate limiting at HTTP layer) and SEC-01 (default no-auth), cost and availability are unguarded for any internet-reachable deployment.</p>
+      <p><strong>Recommended fix:</strong> Add request rate limiting at the FastAPI middleware layer (e.g., <code>slowapi</code>). Implement fair scheduling in the worker to prevent one tenant from monopolizing slots. Consider per-tenant quotas for LLM calls.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="SCA-02">
+    <div class="author"><span class="tag medium">P2</span> SCA-02 — Connection pool max size (100) may be insufficient under high concurrency</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/config.py</code> (<code>DEFAULT_DB_POOL_MAX_SIZE=100</code>)</p>
+      <p><strong>Technical description:</strong> With <code>recall_max_concurrent=32</code>, worker connections, and health checks, 100 concurrent connections is reasonable for PostgreSQL. However, no circuit breaker pattern exists for database connection failures. Under load, degraded connections could exhaust the pool.</p>
+      <p><strong>Recommended fix:</strong> Add connection pool metrics/logging. Consider implementing a circuit breaker. Make pool size more configurable based on deployment scale.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="SCA-03">
+    <div class="author"><span class="tag medium">P2</span> SCA-03 — Embedding and reranking model loads are synchronous in MemoryEngine.initialize()</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py:1203</code></p>
+      <p><strong>Technical description:</strong> <code>init_embeddings()</code> and <code>init_cross_encoder()</code> load models during <code>initialize()</code>. The <code>lazy_reranker</code> flag can defer cross_encoder init, but embeddings are always synchronous (~5-15 seconds for local models).</p>
+      <p><strong>Recommended fix:</strong> Add lazy initialization for the embedding model as well. External embedding providers skip local loading entirely, so this only affects local model deployments.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="SCA-04">
+    <div class="author"><span class="tag medium">P2</span> SCA-04 — No request body size limiting middleware on API endpoints <span class="review-badge new">found by spot-check</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/api/http.py:1797</code></p>
+      <p><strong>Technical description:</strong> No global request body size limiting middleware exists. File uploads have per-batch size limits (<code>file_conversion_max_batch_size_mb</code>=50MB), but general JSON request bodies (retain/recall/reflect) have no size limit. Combined with SEC-03 (no rate limiting), an unauthenticated client can send unlimited large payloads.</p>
+      <p><strong>Recommended fix:</strong> Add request body size limiting middleware. Configure limits via environment variables (e.g., 10MB for JSON, 100MB for file uploads).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- MAINTAINABILITY -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Maintainability — 97/100</div>
+<section id="maintainability">
+  <div class="sec-head"><div class="num">06</div><h2>Maintainability Findings</h2></div>
+  <p class="sec-intro">3 findings: 1 P2, 1 P3, 1 PASS. Maintainability is strong — documentation and docstrings are comprehensive.</p>
+
+  <div class="bubble medium mb-24" id="MAI-01">
+    <div class="author"><span class="tag medium">P2</span> MAI-01 — Monorepo with 9 Python packages and 3 JS/TS packages — no shared linting config in CI</div>
+    <div class="text">
+      <p><strong>Technical description:</strong> The repo contains <code>hindsight-api</code>, <code>hindsight</code>, <code>hindsight-embed</code>, <code>hindsight-cli</code>, <code>hindsight-clients</code>, <code>hindsight-integrations</code> (4 packages), <code>hindsight-dev</code>, and <code>hindsight-docs</code>. Each has its own <code>pyproject.toml</code>. A lint script exists at <code>scripts/hooks/lint.sh</code> and runs <code>ruff</code>, but it is only called in the <code>verify-generated-files</code> CI job, not as a general lint step.</p>
+      <p><strong>Recommended fix:</strong> Add a root-level ruff configuration and run it in CI as a mandatory check.</p>
+    </div>
+  </div>
+
+  <div class="bubble nit mb-24" id="MAI-02">
+    <div class="author"><span class="tag p3">P3</span> MAI-02 — Alembic migration files use non-sequential revision hashes <span class="review-badge downgraded">downgraded from P2</span></div>
+    <div class="text">
+      <p><strong>Technical description:</strong> Migration revision IDs are hex strings (e.g., <code>5a366d414dce</code>) with no ordering convention. This is standard Alembic behavior — history is tracked via <code>revision</code> and <code>down_revision</code> fields. <code>alembic history</code> provides full navigation.</p>
+      <p><strong>Review note:</strong> Downgraded to P3 — purely a DX preference for filename readability. Alembic tooling handles history traversal natively.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="MAI-03">
+    <div class="author"><span class="tag safe">PASS</span> MAI-03 — Good documentation and docstring coverage</div>
+    <div class="text">
+      <p>Configuration has comprehensive docstrings. <code>MemoryEngineInterface</code> has thorough method-level documentation. Code is generally well-commented with clear intent. <code>SECURITY.md</code> provides a vulnerability reporting policy.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TECHNICAL DEBT -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Technical Debt — 91/100</div>
+<section id="debt">
+  <div class="sec-head"><div class="num">07</div><h2>Technical Debt Findings</h2></div>
+  <p class="sec-intro">3 findings: all P2. TD-01 overlaps with ARCH-01 (same root cause: the god class), but the decomposition plan perspective adds value.</p>
+
+  <div class="bubble medium mb-24" id="TD-01">
+    <div class="author"><span class="tag medium">P2</span> TD-01 — memory_engine.py is 7000 lines — decomposition deferred indefinitely <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-ARCH-01">see ARCH-01</a></span> <span class="review-badge downgraded">downgraded from P1</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/hindsight_api/engine/memory_engine.py:223</code></p>
+      <p><strong>Technical description:</strong> This finding tracks the <em>technical debt angle</em> (decomposition plan) of the god class issue covered by ARCH-01. While ARCH-01 addresses the structural risk, TD-01 tracks the deliberate deferral of decomposition and provides the phased plan.</p>
+      <p><strong>Decomposition plan:</strong> (1) Extract <code>WorkerManager</code> into <code>worker/task_executor.py</code>, (2) Extract <code>DocumentManager</code>, <code>BankManager</code> into their own modules, (3) Extract <code>ConnectionPool</code> into <code>db/connection.py</code>, (4) Extract consolidation into <code>consolidation/engine.py</code>. MemoryEngine becomes a facade delegating to these modules.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="TD-02">
+    <div class="author"><span class="tag medium">P2</span> TD-02 — Cobuilder engine (25,000+ lines) lacks test coverage</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>cobuilder/engine/</code> (5,171 lines across pipeline_runner.py, session_runner.py, guardian.py)</p>
+      <p><strong>Technical description:</strong> The cobuilder/engine/ directory has 5,171 lines across core modules. Only 4 test files exist in <code>cobuilder/engine/conditions/tests/</code> (testing only the conditions subsystem). The orchestration, repomap, and pipeline subsystems have zero test coverage.</p>
+      <p><strong>Recommended fix:</strong> Prioritize characterization tests for core paths: pipeline parsing, node/edge operations, signal protocol, and state transitions.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="TD-03">
+    <div class="author"><span class="tag medium">P2</span> TD-03 — OpenAPI client code is auto-generated but checked into version control</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-clients/python/hindsight_client_api/</code></p>
+      <p><strong>Technical description:</strong> Python and TypeScript clients in <code>hindsight-clients/</code> are auto-generated from OpenAPI specs. CI verifies generated code matches what <code>generate-clients.sh</code> produces, but the checked-in generated code creates git diff noise and a DX burden.</p>
+      <p><strong>Recommended fix:</strong> Add generated client code to <code>.gitignore</code> and generate during build/publish. Alternatively, keep in git but add a strict CI check that regenerates and compares on every PR.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- DEPENDENCY HEALTH -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Dependency Health — 90/100</div>
+<section id="dependencies">
+  <div class="sec-head"><div class="num">08</div><h2>Dependency Health Findings</h2></div>
+  <p class="sec-intro">3 findings: 1 P1 (torch as required dep), 1 P2, 1 PASS. The P1 is a deployment efficiency issue that affects all production images.</p>
+
+  <div class="bubble critical mb-24" id="DEP-02">
+    <div class="author"><span class="tag critical">P1</span> DEP-02 — sentence-transformers and torch included as required dependencies <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-DEP-02">Founder view</a></span> <span class="review-badge upgraded">upgraded from P2</span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/pyproject.toml</code> (lines 49-51)</p>
+      <p><strong>Technical description:</strong> <code>sentence-transformers>=3.3.0</code> and <code>torch>=2.6.0</code> are listed as <em>required</em> dependencies. This means every production deployment — including those using external embedding providers (OpenAI, Anthropic) — must install a ~2GB dependency that is never used at runtime. The Docker <code>INCLUDE_LOCAL_MODELS=false</code> build arg can exclude model files, but the Python package still installs <code>torch</code> regardless.</p>
+      <p><strong>Impact:</strong> (1) Docker image size inflated by ~2GB for ALL deployments, (2) <code>torch</code> has significant security surface area, (3) combined with SEC-03 and SCA-01, deployments that never use local models pay both cost and security overhead.</p>
+      <p><strong>Recommended fix:</strong> Move <code>sentence-transformers</code> and <code>torch</code> to an <code>extras_require</code> group: <code>pip install hindsight-api[local-models]</code>. Make local embedding models opt-in rather than default.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="DEP-01">
+    <div class="author"><span class="tag medium">P2</span> DEP-01 — Transitive dependency pins in pyproject.toml for CVE mitigations</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/pyproject.toml</code></p>
+      <p><strong>Technical description:</strong> Dependencies like <code>pyasn1>=0.6.2</code>, <code>urllib3>=2.6.3</code>, <code>langchain-core>=1.2.5</code>, <code>filelock>=3.20.1</code>, <code>authlib>=1.6.6</code>, <code>aiohttp>=3.13.3</code> are pinned with CVE fix comments. These are transitive dependencies listed as direct dependencies to force specific versions.</p>
+      <p><strong>Recommended fix:</strong> Use <code>pip-audit</code> or <code>safety</code> in CI for vulnerability detection. Consider a <code>requirements-constraints</code> file for version overrides instead of adding transitive deps to direct dependencies.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="DEP-03">
+    <div class="author"><span class="tag safe">PASS</span> DEP-03 — CI pipeline includes comprehensive multi-version Python testing</div>
+    <div class="text">
+      <p>CI tests across Python 3.11, 3.12, 3.13, 3.14. Builds Docker images, runs integration tests, lint checks, and cross-client tests (Python, TypeScript, Rust, Go). Dependency security patches are explicitly tracked in <code>pyproject.toml</code>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TESTING -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="audit-domain-header">Testing — 90/100</div>
+<section id="testing">
+  <div class="sec-head"><div class="num">09</div><h2>Testing Findings</h2></div>
+  <p class="sec-intro">4 findings: 1 P1 (no unit tests for god class), 1 P2, 1 P3, 1 PASS. The god class (ARCH-01) has zero dedicated unit tests, compounding its regression risk.</p>
+
+  <div class="bubble risk mb-24" id="TST-01">
+    <div class="author"><span class="tag risk">P1</span> TST-01 — Core engine (memory_engine.py, 7000 lines) has limited unit test coverage <span class="related-finding">&rarr; <a href="architecture-review-hindsight-2026-05-27-founder.html#founder-TST-01">Founder view</a></span></div>
+    <div class="text">
+      <p><strong>File:</strong> <code>hindsight-api/tests/</code> (81 test files, all integration tests requiring PostgreSQL)</p>
+      <p><strong>Technical description:</strong> 81 test files exist but are predominantly integration tests requiring a running PostgreSQL database (verified via <code>EmbeddedPostgres</code> fixture in <code>conftest.py</code>). Only 10 test files use <code>Mock</code> or <code>patch</code>. The 6,979-line <code>MemoryEngine</code> with 97 methods has zero dedicated unit tests. <code>MemoryEngineInterface</code> ABC (585 lines) exists as a clean mock injection seam but is completely unused for testing.</p>
+      <p><strong>Compound risk:</strong> This directly enables ARCH-01's regression risk — without unit tests as a safety net, decomposition of the god class is dangerous.</p>
+      <p><strong>Recommended fix:</strong> Add a unit test suite for <code>MemoryEngine</code> using mocked database connections. Test retain logic, recall logic, reflect orchestration, and consolidation independently. Use the <code>Repository</code> pattern to enable mock injection.</p>
+    </div>
+  </div>
+
+  <div class="bubble medium mb-24" id="TST-02">
+    <div class="author"><span class="tag medium">P2</span> TST-02 — No test coverage metrics or coverage enforcement in CI</div>
+    <div class="text">
+      <p><strong>File:</strong> <code>.github/workflows/test.yml</code></p>
+      <p><strong>Technical description:</strong> CI runs <code>pytest</code> but with no <code>--cov</code> flag, no coverage threshold, and no coverage reporting. Critical modules like <code>memory_engine.py</code> have zero dedicated unit test coverage.</p>
+      <p><strong>Recommended fix:</strong> Add <code>pytest-cov</code> to test dependencies. Add coverage reporting to CI. Set minimum coverage thresholds for critical paths (e.g., <code>memory_engine.py</code>, <code>config.py</code>).</p>
+    </div>
+  </div>
+
+  <div class="bubble nit mb-24" id="TST-03">
+    <div class="author"><span class="tag p3">P3</span> TST-03 — config_resolver and hierarchical config lack dedicated test file <span class="review-badge downgraded">downgraded from P2</span></div>
+    <div class="text">
+      <p><strong>Technical description:</strong> <code>config_resolver.py</code> (275 lines) implements per-bank configuration override system. Tests exist in <code>test_hierarchical_config.py</code> and <code>test_config_validation.py</code>, but the test file name doesn't match the source file, reducing discoverability.</p>
+      <p><strong>Review note:</strong> Downgraded to P3 — coverage exists, just not in a file named after <code>config_resolver.py</code>.</p>
+    </div>
+  </div>
+
+  <div class="bubble pass mb-24" id="TST-04">
+    <div class="author"><span class="tag safe">PASS</span> TST-04 — Comprehensive CI testing across all client libraries and integrations</div>
+    <div class="text">
+      <p>CI tests cover: API (Python 3.11-3.14), Python client, TypeScript client, Rust client, Go client, CLI smoke tests, CrewAI/LiteLLM/PydanticAI integrations, embed library, docs examples, upgrade tests, OpenAPI compatibility checks, and build verification.</p>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<p class="text-small" style="margin-top:64px;border-top:1.5px solid var(--gray-300);padding-top:16px;">
+  Generated 2026-05-27 &middot; Four-tier adversarial review (P0 challenge &rarr; P1 challenge &rarr; P2 challenge &rarr; Pass spot-check) &middot; Deterministic scoring &middot;
+  <a href="architecture-review-hindsight-2026-05-27-founder.html" style="color:var(--sky);">Founder Report &rarr;</a>
+</p>
+
+</div></body></html>

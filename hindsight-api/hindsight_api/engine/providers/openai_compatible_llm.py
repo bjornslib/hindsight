@@ -247,6 +247,9 @@ class OpenAICompatibleLLM(LLMInterface):
             # Add reasoning parameters for reasoning models
             if is_reasoning_model:
                 extra_body["include_reasoning"] = False
+            # Disable Ollama think mode so content is populated instead of reasoning
+            if self.provider == "ollama":
+                extra_body["think"] = False
             if extra_body:
                 call_params["extra_body"] = extra_body
 

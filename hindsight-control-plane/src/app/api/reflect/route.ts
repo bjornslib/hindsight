@@ -42,7 +42,15 @@ export async function POST(request: NextRequest) {
       body: requestBody,
     });
 
-    return NextResponse.json(response.data, { status: 200 });
+    const jsonResponse = {
+      text: response.data?.text,
+      based_on: response.data?.based_on,
+      structured_output: response.data?.structured_output,
+      usage: response.data?.usage,
+      trace: response.data?.trace,
+    };
+
+    return NextResponse.json(jsonResponse, { status: 200 });
   } catch (error) {
     console.error("Error reflecting:", error);
     return NextResponse.json({ error: "Failed to reflect" }, { status: 500 });

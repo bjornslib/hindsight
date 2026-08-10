@@ -69,6 +69,50 @@ cd hindsight-control-plane && npm run dev
 ./scripts/benchmarks/start-visualizer.sh  # View results at localhost:8001
 ```
 
+### Docker Backup & Restore
+
+The Docker deployment uses pg0 (embedded PostgreSQL) with data stored in the `hindsight-data` Docker volume. Data loss has occurred from OOM kills corrupting pg0, so multiple backup layers exist:
+
+**Backup layers (all three are active):**
+1. **In-container pg_dump loop** (`start-all.sh`): Runs every 12h, stores gzipped dumps in `/home/hindsight/.pg0/backups/` inside the volume. Has a safety check that skips backup if `memory_units` is empty (prevents overwriting good backups after OOM crash).
+2. **Host-side cron** (`scripts/backup-hindsight.sh`): Runs daily at 2am, copies good in-container dumps (>10KB) to `~/.hindsight-backups/` on the Mac. Keeps 14 backups. This survives volume loss.
+3. **Startup auto-restore** (`start-all.sh`): On container start, if `memory_units` count is 0 and a backup >10KB exists, automatically restores from the largest backup before the API starts.
+
+```bash
+# List available backups (host-side and in-container)
+./scripts/backup-hindsight.sh --list
+
+# Run a manual host-side backup now
+./scripts/backup-hindsight.sh
+
+# Restore from the best available backup (interactive, confirms before restoring)
+./scripts/restore-hindsight.sh
+
+# Restore from a specific backup file
+./scripts/restore-hindsight.sh ~/.hindsight-backups/hindsight-20260326-160512.sql.gz
+
+# Dry-run restore (shows what would happen without changing anything)
+./scripts/restore-hindsight.sh --dry-run
+
+# Install/verify the daily cron job
+./scripts/backup-hindsight.sh --install-cron
+
+# Manual volume-level backup (copies entire Docker volume)
+./docker/backup-volume.sh [backup-name]
+```
+
+**Rebuild & deploy (preserves data):**
+```bash
+./docker/rebuild.sh              # Build + restart (volume preserved)
+./docker/rebuild.sh --no-cache   # Full clean rebuild
+```
+
+**If data appears empty after a crash:**
+1. Check `docker inspect hindsight-mcp --format '{{.State.OOMKilled}}'` — if `true`, OOM killed the container
+2. Run `./scripts/restore-hindsight.sh` to restore from the best host-side backup
+3. If no host-side backups exist, check in-container: `docker exec hindsight-mcp ls -lhS /home/hindsight/.pg0/backups/`
+4. Volume-level backups: `docker volume ls | grep hindsight`
+
 ## Architecture
 
 ### Monorepo Structure
